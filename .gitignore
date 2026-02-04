@@ -1,0 +1,136 @@
+# =============================================
+# ShibaGram Desktop - Git Ignore
+# =============================================
+
+# =============================================
+# Gradle
+# =============================================
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# =============================================
+# IDE - IntelliJ IDEA / Android Studio
+# =============================================
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+
+# =============================================
+# IDE - Eclipse
+# =============================================
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+# =============================================
+# IDE - VS Code
+# =============================================
+.vscode/
+
+# =============================================
+# Kotlin
+# =============================================
+*.class
+*.log
+*.jar
+!libs/*.jar
+
+# =============================================
+# Native Libraries (sensitive)
+# =============================================
+# Keep native libs in .gitignore if they are large
+# or need to be downloaded separately
+libs/*.dll
+# libs/*.so
+# libs/*.dylib
+
+# =============================================
+# TDLib Data (contains auth tokens and cache)
+# =============================================
+tdlib-data/
+tdlib_data/
+.tdlib/
+telegram-data/
+
+# =============================================
+# Compose Desktop Build Artifacts
+# =============================================
+/build/compose/
+/build/wix*/
+
+# =============================================
+# OS Generated Files
+# =============================================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+
+# =============================================
+# Logs
+# =============================================
+*.log
+logs/
+*.log.*
+
+# =============================================
+# Database files (local SQLite)
+# =============================================
+*.db
+*.sqlite
+*.sqlite3
+shibagram.db
+
+# =============================================
+# Credentials & Secrets
+# =============================================
+# Never commit API keys or credentials!
+secrets.properties
+local.properties
+*.keystore
+*.jks
+
+# =============================================
+# Temporary Files
+# =============================================
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# =============================================
+# Package/Distribution Files
+# =============================================
+*.exe
+*.msi
+*.dmg
+*.pkg
+*.deb
+*.rpm
+*.AppImage
+!gradlew.bat

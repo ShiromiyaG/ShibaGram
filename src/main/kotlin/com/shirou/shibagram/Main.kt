@@ -1,0 +1,589 @@
+package com.shirou.shibagram
+
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.*
+import com.shirou.shibagram.data.remote.TelegramClientService
+import com.shirou.shibagram.data.repository.ChannelMessagesRepository
+import com.shirou.shibagram.data.repository.TelegramAuthRepository
+import com.shirou.shibagram.data.repository.TelegramChannelsRepository
+import com.shirou.shibagram.domain.model.*
+import com.shirou.shibagram.streaming.TelegramVideoDataProvider
+import com.shirou.shibagram.streaming.VideoStreamingServer
+import com.shirou.shibagram.ui.components.ShibaGramNavigationRail
+import com.shirou.shibagram.ui.components.ShibaGramTopBar
+import com.shirou.shibagram.ui.screens.*
+import com.shirou.shibagram.ui.theme.ShibaGramTheme
+import com.shirou.shibagram.vlc.VlcMediaPlayer
+import kotlinx.coroutines.launch
+import java.awt.Dimension
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import javax.imageio.ImageIO
+
+/**
+ * Main application entry point.
+ */
+fun main() = application {
+    var isFullscreen by remember { mutableStateOf(false) }
+    
+    val windowState = rememberWindowState(
+        placement = WindowPlacement.Floating,
+        width = 1280.dp,
+        height = 800.dp
+    )
+    
+    // Update window placement when fullscreen changes
+    LaunchedEffect(isFullscreen) {
+        windowState.placement = if (isFullscreen) WindowPlacement.Fullscreen else WindowPlacement.Floating
+    }
+    
+    // Load app icon
+    val appIcon = remember {
+        Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")?.use { stream ->
+            BitmapPainter(ImageIO.read(stream).toComposeImageBitmap())
+        }
+    }
+    
+    Window(
+        onCloseRequest = ::exitApplication,
+        state = windowState,
+        title = "ShibaGram - Telegram Media Client",
+        icon = appIcon
+    ) {
+        window.minimumSize = Dimension(800, 600)
+        
+        ShibaGramApp(
+            isFullscreen = isFullscreen,
+            onFullscreenChange = { isFullscreen = it }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ShibaGramApp(
+    isFullscreen: Boolean = false,
+    onFullscreenChange: (Boolean) -> Unit = {}
+) {
+    // State
+    var isDarkTheme by remember { mutableStateOf(false) }
+    val systemDarkTheme = isSystemInDarkTheme()
+    
+    // Use system theme by default
+    val actualDarkTheme = isDarkTheme || systemDarkTheme
+    
+    // Repositories
+    val authRepository = remember { TelegramAuthRepository() }
+    val channelsRepository = remember { TelegramChannelsRepository() }
+    val messagesRepository = remember { ChannelMessagesRepository() }
+    val watchHistoryRepository = remember { com.shirou.shibagram.data.repository.WatchHistoryRepository() }
+    val telegramClient = remember { TelegramClientService.getInstance() }
+    
+    // VLC Player
+    val vlcPlayer = remember { VlcMediaPlayer() }
+    val isVlcPlaying by vlcPlayer.isPlaying.collectAsState()
+    val vlcPosition by vlcPlayer.currentPosition.collectAsState()
+    val vlcDuration by vlcPlayer.duration.collectAsState()
+    val vlcVolume by vlcPlayer.volume.collectAsState()
+    val vlcFrame by vlcPlayer.currentFrame.collectAsState()
+    var vlcInitialized by remember { mutableStateOf(false) }
+    var vlcError by remember { mutableStateOf<String?>(null) }
+    
+    // Audio and subtitle tracks state
+    var audioTracks by remember { mutableStateOf<List<VlcMediaPlayer.TrackInfo>>(emptyList()) }
+    var currentAudioTrack by remember { mutableStateOf(-1) }
+    var subtitleTracks by remember { mutableStateOf<List<VlcMediaPlayer.TrackInfo>>(emptyList()) }
+    var currentSubtitleTrack by remember { mutableStateOf(-1) }
+    var playbackSpeed by remember { mutableStateOf(1f) }
+    
+    // Update tracks when video starts playing
+    LaunchedEffect(isVlcPlaying, vlcDuration) {
+        if (isVlcPlaying && vlcDuration > 0) {
+            // Small delay to let VLC load track info
+            kotlinx.coroutines.delay(500)
+            audioTracks = vlcPlayer.getAudioTracks()
+            currentAudioTrack = vlcPlayer.getCurrentAudioTrack()
+            subtitleTracks = vlcPlayer.getSubtitleTracks()
+            currentSubtitleTrack = vlcPlayer.getCurrentSubtitleTrack()
+        }
+    }
+    
+    // Initialize VLC
+    DisposableEffect(Unit) {
+        vlcPlayer.onError = { error -> vlcError = error }
+        vlcInitialized = vlcPlayer.initialize()
+        onDispose {
+            vlcPlayer.release()
+        }
+    }
+    
+    // Auth state
+    val authState by authRepository.authState.collectAsState()
+    
+    // Channels
+    val channels by channelsRepository.channels.collectAsState()
+    
+    // Chat folders
+    val chatFolders by channelsRepository.chatFolders.collectAsState()
+    val selectedFolderId by channelsRepository.selectedFolderId.collectAsState()
+    
+    // App state
+    var selectedNavIndex by remember { mutableStateOf(0) }
+    var selectedChannel by remember { mutableStateOf<Channel?>(null) }
+    var currentVideos by remember { mutableStateOf<List<MediaMessage>>(emptyList()) }
+    var isLoadingVideos by remember { mutableStateOf(false) }
+    var viewingMode by remember { mutableStateOf(ViewingMode.GRID) }
+    var showSearch by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var currentPlayingVideo by remember { mutableStateOf<MediaMessage?>(null) }
+    var currentPlaylist by remember { mutableStateOf<VideoPlaylist?>(null) }
+    var autoPlayNext by remember { mutableStateOf(true) }
+    var downloadPath by remember { mutableStateOf(java.nio.file.Paths.get(System.getProperty("user.home"), "Downloads", "ShibaGram").toString()) }
+    
+    // Continue watching and saved videos from repository
+    val continueWatchingVideos by watchHistoryRepository.continueWatchingVideos.collectAsState()
+    val savedVideos by watchHistoryRepository.savedVideos.collectAsState()
+    
+    // Streaming server and current streaming URL
+    val streamingServer = remember { VideoStreamingServer.getInstance() }
+    var currentStreamingToken by remember { mutableStateOf<String?>(null) }
+    
+    // Filtered videos based on search
+    val filteredVideos = remember(currentVideos, searchQuery) {
+        if (searchQuery.isBlank()) currentVideos
+        else currentVideos.filter { video ->
+            video.filename?.contains(searchQuery, ignoreCase = true) == true ||
+            video.caption?.contains(searchQuery, ignoreCase = true) == true ||
+            video.title?.contains(searchQuery, ignoreCase = true) == true
+        }
+    }
+    
+    // Coroutine scope
+    val scope = rememberCoroutineScope()
+    
+    // Initialize Telegram client and load watch history
+    LaunchedEffect(Unit) {
+        authRepository.initialize()
+        watchHistoryRepository.loadContinueWatching()
+        watchHistoryRepository.loadSavedVideos()
+    }
+    
+    // Save playback progress periodically
+    LaunchedEffect(currentPlayingVideo, vlcPosition, vlcDuration) {
+        if (currentPlayingVideo != null && vlcPosition > 0 && vlcDuration > 0) {
+            // Save progress every 5 seconds
+            kotlinx.coroutines.delay(5000)
+            watchHistoryRepository.saveProgress(
+                messageId = currentPlayingVideo!!.id,
+                chatId = currentPlayingVideo!!.chatId,
+                position = vlcPosition,
+                duration = vlcDuration
+            )
+        }
+    }
+    
+    // Track active data provider for cleanup
+    var activeDataProvider by remember { mutableStateOf<TelegramVideoDataProvider?>(null) }
+    
+    // Play video when selected
+    LaunchedEffect(currentPlayingVideo) {
+        currentPlayingVideo?.let { video ->
+            if (!vlcInitialized) {
+                println("VLC not initialized, cannot play video")
+                return@let
+            }
+            
+            // Cleanup previous stream
+            currentStreamingToken?.let { token ->
+                streamingServer.unregisterVideo(token)
+            }
+            currentStreamingToken = null
+            activeDataProvider?.close()
+            activeDataProvider = null
+            
+            // Check if video is already fully downloaded locally
+            val localPath = video.videoFile.localPath
+            if (localPath != null && video.videoFile.isDownloaded) {
+                // Play local file directly
+                println("Playing local file: $localPath")
+                vlcPlayer.play(localPath)
+            } else {
+                // Start progressive download and play from local file as it downloads
+                scope.launch {
+                    val fileId = video.videoFile.id
+                    val fileSize = video.videoFile.size
+                    
+                    // Create data provider to start the download
+                    val dataProvider = TelegramVideoDataProvider(
+                        telegramService = telegramClient,
+                        fileId = fileId,
+                        fileSize = fileSize
+                    )
+                    activeDataProvider = dataProvider
+                    
+                    // Wait for initial buffer before starting playback
+                    println("Buffering video (${fileSize / 1024 / 1024}MB total)...")
+                    val bufferReady = dataProvider.waitForBuffer()
+                    if (!bufferReady) {
+                        println("Failed to buffer video")
+                        dataProvider.close()
+                        activeDataProvider = null
+                        return@launch
+                    }
+                    println("Buffer ready")
+                    
+                    // Get the local file path that TDLib is downloading to
+                    val fileInfo = telegramClient.getFileInfo(fileId)
+                    val downloadingPath = fileInfo?.local?.path?.takeIf { it.isNotEmpty() }
+                    
+                    if (downloadingPath != null) {
+                        println("Playing from local file (still downloading): $downloadingPath")
+                        // Play the local file directly - VLC can handle partially downloaded files
+                        vlcPlayer.play(downloadingPath)
+                    } else {
+                        // Fallback to HTTP streaming
+                        val mimeType = video.mimeType ?: "video/mp4"
+                        val streamUrl = streamingServer.registerVideo(fileId, fileSize, mimeType, dataProvider)
+                        currentStreamingToken = "video_${fileId}"
+                        println("Streaming video from: $streamUrl")
+                        vlcPlayer.play(streamUrl)
+                    }
+                }
+            }
+        } ?: run {
+            // Cleanup when stopping
+            currentStreamingToken?.let { token ->
+                streamingServer.unregisterVideo(token)
+            }
+            currentStreamingToken = null
+            activeDataProvider?.close()
+            activeDataProvider = null
+            if (vlcInitialized) vlcPlayer.stop()
+        }
+    }
+    
+    // Load videos when channel is selected
+    LaunchedEffect(selectedChannel) {
+        selectedChannel?.let { channel ->
+            isLoadingVideos = true
+            try {
+                messagesRepository.getVideoMessagesWithPagination(channel.id)
+                    .collect { page ->
+                        currentVideos = page.messages
+                        isLoadingVideos = false
+                    }
+            } catch (e: Exception) {
+                isLoadingVideos = false
+            }
+        }
+    }
+    
+    ShibaGramTheme(darkTheme = actualDarkTheme) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background
+        ) {
+            when (authState) {
+                is AuthState.Authenticated -> {
+                    // Main app content
+                    if (currentPlayingVideo != null) {
+                        // Video player
+                        VideoPlayerScreen(
+                            currentVideo = currentPlayingVideo,
+                            playlist = currentPlaylist,
+                            isPlaying = isVlcPlaying,
+                            currentPosition = vlcPosition,
+                            duration = if (vlcDuration > 0) vlcDuration else currentPlayingVideo?.duration?.times(1000L) ?: 0L,
+                            volume = vlcVolume,
+                            onPlayPauseClick = { vlcPlayer.togglePlayPause() },
+                            onSeek = { position -> vlcPlayer.seekTo(position) },
+                            onVolumeChange = { vol -> vlcPlayer.setVolume(vol) },
+                            onPreviousClick = {
+                                currentPlaylist?.let {
+                                    val newPlaylist = it.previous()
+                                    currentPlaylist = newPlaylist
+                                    currentPlayingVideo = newPlaylist.currentVideo
+                                }
+                            },
+                            onNextClick = {
+                                currentPlaylist?.let {
+                                    val newPlaylist = it.next()
+                                    currentPlaylist = newPlaylist
+                                    currentPlayingVideo = newPlaylist.currentVideo
+                                }
+                            },
+                            onFullscreenToggle = { onFullscreenChange(!isFullscreen) },
+                            onCloseClick = {
+                                vlcPlayer.stop()
+                                currentPlayingVideo = null
+                                currentPlaylist = null
+                                // Exit fullscreen when closing video
+                                if (isFullscreen) {
+                                    onFullscreenChange(false)
+                                }
+                            },
+                            onVideoSelect = { index ->
+                                currentPlaylist?.let {
+                                    val newPlaylist = it.goTo(index)
+                                    currentPlaylist = newPlaylist
+                                    currentPlayingVideo = newPlaylist.currentVideo
+                                }
+                            },
+                            isFullscreen = isFullscreen,
+                            // Audio tracks
+                            audioTracks = audioTracks.map { com.shirou.shibagram.ui.screens.TrackInfo(it.id, it.name) },
+                            currentAudioTrack = currentAudioTrack,
+                            onAudioTrackSelect = { trackId ->
+                                vlcPlayer.setAudioTrack(trackId)
+                                currentAudioTrack = trackId
+                            },
+                            // Subtitle tracks
+                            subtitleTracks = subtitleTracks.map { com.shirou.shibagram.ui.screens.TrackInfo(it.id, it.name) },
+                            currentSubtitleTrack = currentSubtitleTrack,
+                            onSubtitleTrackSelect = { trackId ->
+                                vlcPlayer.setSubtitleTrack(trackId)
+                                currentSubtitleTrack = trackId
+                            },
+                            // Playback speed
+                            currentPlaybackSpeed = playbackSpeed,
+                            onPlaybackSpeedChange = { speed ->
+                                vlcPlayer.setPlaybackSpeed(speed)
+                                playbackSpeed = speed
+                            },
+                            videoContent = {
+                                // VLC video frame rendered directly in Compose
+                                Box(
+                                    modifier = Modifier.fillMaxSize().background(Color.Black),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (vlcInitialized) {
+                                        vlcFrame?.let { frame ->
+                                            Image(
+                                                bitmap = frame,
+                                                contentDescription = "Video",
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Fit
+                                            )
+                                        } ?: run {
+                                            // Show loading indicator while video is loading
+                                            val isBuffering by vlcPlayer.isBuffering.collectAsState()
+                                            if (isVlcPlaying || isBuffering) {
+                                                CircularProgressIndicator(
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        // Show error if VLC not available
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(
+                                                text = vlcError ?: "VLC player not available",
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                            Text(
+                                                text = "Please install VLC media player",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    } else {
+                        // Main navigation layout
+                        Row(modifier = Modifier.fillMaxSize()) {
+                            // Navigation rail
+                            ShibaGramNavigationRail(
+                                selectedIndex = selectedNavIndex,
+                                onIndexSelected = { selectedNavIndex = it }
+                            )
+                            
+                            VerticalDivider()
+                            
+                            // Main content
+                            Column(modifier = Modifier.weight(1f)) {
+                                // Top bar with search
+                                ShibaGramTopBar(
+                                    title = when (selectedNavIndex) {
+                                        0 -> "Home"
+                                        1 -> "Channels"
+                                        2 -> "Settings"
+                                        else -> "ShibaGram"
+                                    },
+                                    onSearchClick = { showSearch = !showSearch },
+                                    onViewModeChange = { viewingMode = it },
+                                    currentViewMode = viewingMode
+                                )
+                                
+                                // Search bar when visible
+                                if (showSearch) {
+                                    com.shirou.shibagram.ui.components.SearchBar(
+                                        query = searchQuery,
+                                        onQueryChange = { searchQuery = it },
+                                        onSearch = { /* Search is reactive */ },
+                                        onClose = { 
+                                            showSearch = false
+                                            searchQuery = ""
+                                        },
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                                
+                                HorizontalDivider()
+                                
+                                // Screen content
+                                when (selectedNavIndex) {
+                                    0 -> HomeScreen(
+                                        recentVideos = channels.take(5).map { channel ->
+                                            channel to filteredVideos.filter { it.chatId == channel.id }.take(10)
+                                        },
+                                        continueWatchingVideos = continueWatchingVideos,
+                                        savedVideos = savedVideos,
+                                        onVideoClick = { video ->
+                                            currentPlayingVideo = video
+                                            currentPlaylist = VideoPlaylist(
+                                                id = video.chatId,
+                                                channelId = video.chatId,
+                                                channelName = channels.find { it.id == video.chatId }?.name ?: "",
+                                                videos = currentVideos,
+                                                currentIndex = currentVideos.indexOf(video)
+                                            )
+                                        },
+                                        onChannelClick = { channel ->
+                                            selectedChannel = channel
+                                            selectedNavIndex = 1
+                                        },
+                                        onSaveVideo = { video ->
+                                            scope.launch {
+                                                if (savedVideos.any { it.id == video.id }) {
+                                                    watchHistoryRepository.unsaveVideo(video.id)
+                                                } else {
+                                                    watchHistoryRepository.saveVideo(video)
+                                                }
+                                            }
+                                        },
+                                        onRemoveFromContinue = { video ->
+                                            scope.launch {
+                                                watchHistoryRepository.removeFromContinueWatching(video.id)
+                                            }
+                                        },
+                                        isLoading = isLoadingVideos
+                                    )
+                                    
+                                    1 -> ChannelsScreen(
+                                        channels = channels,
+                                        selectedChannel = selectedChannel,
+                                        videos = filteredVideos,
+                                        onChannelSelect = { selectedChannel = it },
+                                        onVideoClick = { video ->
+                                            currentPlayingVideo = video
+                                            currentPlaylist = VideoPlaylist(
+                                                id = selectedChannel?.id ?: 0,
+                                                channelId = selectedChannel?.id ?: 0,
+                                                channelName = selectedChannel?.name ?: "",
+                                                videos = currentVideos,
+                                                currentIndex = currentVideos.indexOf(video)
+                                            )
+                                        },
+                                        isLoading = isLoadingVideos,
+                                        viewingMode = viewingMode,
+                                        folders = chatFolders,
+                                        selectedFolderId = selectedFolderId,
+                                        onFolderSelect = { folderId ->
+                                            channelsRepository.selectFolder(folderId)
+                                        }
+                                    )
+                                    
+                                    2 -> SettingsScreen(
+                                        isDarkTheme = isDarkTheme,
+                                        onDarkThemeChange = { isDarkTheme = it },
+                                        autoPlayNext = autoPlayNext,
+                                        onAutoPlayNextChange = { autoPlayNext = it },
+                                        downloadPath = downloadPath,
+                                        onDownloadPathChange = { downloadPath = it },
+                                        onLogoutClick = {
+                                            scope.launch {
+                                                authRepository.logout()
+                                            }
+                                        },
+                                        onClearCacheClick = { 
+                                            // Clear telegram cache and downloaded videos
+                                            scope.launch {
+                                                try {
+                                                    // Clear cache directory
+                                                    val cacheDir = java.io.File(System.getProperty("user.home"), ".ShibaGram/cache")
+                                                    if (cacheDir.exists()) {
+                                                        cacheDir.deleteRecursively()
+                                                    }
+                                                    
+                                                    // Clear session downloads (videos, thumbnails, temp files)
+                                                    val sessionDownloads = java.io.File(System.getProperty("user.home"), ".ShibaGram/session/downloads")
+                                                    if (sessionDownloads.exists()) {
+                                                        sessionDownloads.deleteRecursively()
+                                                        sessionDownloads.mkdirs() // Recreate empty folder
+                                                    }
+                                                    
+                                                    // Clear Downloads/ShibaGram folder
+                                                    val downloadsDir = java.io.File(System.getProperty("user.home"), "Downloads/ShibaGram")
+                                                    if (downloadsDir.exists()) {
+                                                        downloadsDir.deleteRecursively()
+                                                    }
+                                                    
+                                                    println("Cache and downloads cleared successfully")
+                                                } catch (e: Exception) {
+                                                    println("Error clearing cache: ${e.message}")
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                else -> {
+                    // Login screen
+                    LoginScreen(
+                        authState = authState,
+                        onPhoneNumberSubmit = { phone ->
+                            scope.launch {
+                                authRepository.sendPhoneNumber(phone)
+                            }
+                        },
+                        onCodeSubmit = { code ->
+                            scope.launch {
+                                authRepository.sendVerificationCode(code)
+                            }
+                        },
+                        onPasswordSubmit = { password ->
+                            scope.launch {
+                                authRepository.send2FAPassword(password)
+                            }
+                        },
+                        onQRLoginClick = {
+                            scope.launch {
+                                authRepository.initiateQRLogin()
+                            }
+                        },
+                        onBackClick = {
+                            authRepository.resetToPhoneInput()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}

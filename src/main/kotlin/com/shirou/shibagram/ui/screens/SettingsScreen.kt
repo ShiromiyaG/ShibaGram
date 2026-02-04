@@ -1,0 +1,272 @@
+package com.shirou.shibagram.ui.screens
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import java.io.File
+import java.nio.file.Paths
+import javax.swing.JFileChooser
+import javax.swing.SwingUtilities
+
+/**
+ * Settings screen with Material Design 3.
+ */
+@Composable
+fun SettingsScreen(
+    isDarkTheme: Boolean,
+    onDarkThemeChange: (Boolean) -> Unit,
+    onLogoutClick: () -> Unit,
+    onClearCacheClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    autoPlayNext: Boolean = true,
+    onAutoPlayNextChange: (Boolean) -> Unit = {},
+    downloadPath: String = Paths.get(System.getProperty("user.home"), "Downloads", "ShibaGram").toString(),
+    onDownloadPathChange: (String) -> Unit = {}
+) {
+    val scrollState = rememberScrollState()
+    var showLogoutDialog by remember { mutableStateOf(false) }
+    var showClearCacheDialog by remember { mutableStateOf(false) }
+    var cacheCleared by remember { mutableStateOf(false) }
+    
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+    ) {
+        // Header
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(16.dp)
+            )
+        }
+        
+        HorizontalDivider()
+        
+        // Appearance section
+        SettingsSection(title = "Appearance") {
+            SettingsItem(
+                icon = Icons.Default.DarkMode,
+                title = "Dark theme",
+                subtitle = if (isDarkTheme) "On" else "Off",
+                trailing = {
+                    Switch(
+                        checked = isDarkTheme,
+                        onCheckedChange = onDarkThemeChange
+                    )
+                }
+            )
+        }
+        
+        HorizontalDivider()
+        
+        // Storage section
+        SettingsSection(title = "Storage") {
+            SettingsItem(
+                icon = Icons.Default.Storage,
+                title = if (cacheCleared) "Cache cleared" else "Clear cache",
+                subtitle = if (cacheCleared) "All cache and downloads deleted" else "Free up storage space (includes downloaded videos)",
+                onClick = { showClearCacheDialog = true }
+            )
+            
+            SettingsItem(
+                icon = Icons.Default.Folder,
+                title = "Download location",
+                subtitle = downloadPath,
+                onClick = { 
+                    // Open folder chooser dialog
+                    SwingUtilities.invokeLater {
+                        val chooser = JFileChooser().apply {
+                            fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+                            dialogTitle = "Select Download Location"
+                            currentDirectory = File(downloadPath).let { if (it.exists()) it else File(System.getProperty("user.home")) }
+                        }
+                        val result = chooser.showOpenDialog(null)
+                        if (result == JFileChooser.APPROVE_OPTION) {
+                            val selectedFolder = chooser.selectedFile.absolutePath
+                            onDownloadPathChange(selectedFolder)
+                        }
+                    }
+                }
+            )
+        }
+        
+        HorizontalDivider()
+        
+        // Playback section
+        SettingsSection(title = "Playback") {
+            SettingsItem(
+                icon = Icons.Default.Subtitles,
+                title = "Auto-play next",
+                subtitle = "Automatically play next video in playlist",
+                trailing = {
+                    Switch(
+                        checked = autoPlayNext,
+                        onCheckedChange = onAutoPlayNextChange
+                    )
+                }
+            )
+        }
+        
+        HorizontalDivider()
+        
+        // Account section
+        SettingsSection(title = "Account") {
+            SettingsItem(
+                icon = Icons.Default.Logout,
+                title = "Log out",
+                subtitle = "Sign out of your Telegram account",
+                onClick = { showLogoutDialog = true }
+            )
+        }
+        
+        HorizontalDivider()
+        
+        // About section
+        SettingsSection(title = "About") {
+            SettingsItem(
+                icon = Icons.Default.Info,
+                title = "Version",
+                subtitle = "1.0.0"
+            )
+            
+            SettingsItem(
+                icon = Icons.Default.Code,
+                title = "Open source licenses",
+                onClick = { /* Show licenses */ }
+            )
+        }
+        
+        Spacer(modifier = Modifier.height(32.dp))
+    }
+    
+    // Logout confirmation dialog
+    if (showLogoutDialog) {
+        AlertDialog(
+            onDismissRequest = { showLogoutDialog = false },
+            icon = {
+                Icon(Icons.Default.Logout, contentDescription = null)
+            },
+            title = { Text("Log out?") },
+            text = { Text("You will need to sign in again to access your Telegram channels.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLogoutDialog = false
+                        onLogoutClick()
+                    }
+                ) {
+                    Text("Log out")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+    
+    // Clear cache confirmation dialog
+    if (showClearCacheDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearCacheDialog = false },
+            icon = {
+                Icon(Icons.Default.Storage, contentDescription = null)
+            },
+            title = { Text("Clear cache?") },
+            text = { Text("This will delete all cached files and downloaded videos. You will need to download videos again to watch them.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearCacheDialog = false
+                        onClearCacheClick()
+                        cacheCleared = true
+                    }
+                ) {
+                    Text("Clear")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearCacheDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SettingsSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier.padding(vertical = 8.dp)
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+        content()
+    }
+}
+
+@Composable
+private fun SettingsItem(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String? = null,
+    onClick: (() -> Unit)? = null,
+    trailing: @Composable (() -> Unit)? = null
+) {
+    Surface(
+        onClick = onClick ?: {},
+        enabled = onClick != null,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            
+            trailing?.invoke()
+        }
+    }
+}

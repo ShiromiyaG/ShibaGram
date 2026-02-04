@@ -70,9 +70,8 @@
    - Note your `api_id` and `api_hash`
 
 4. **Download TDLib Native Library**
-   - Download prebuilt `tdjni.dll` from: [nicegram-tdlib-releases](https://github.com/nicegram/nicegram-tdlib-releases/releases)
-   - Or build TDLib yourself: [tdlib/td](https://github.com/tdlib/td#building)
-   - Place `tdjni.dll` and dependencies in the `libs/` folder
+   - Build TDLib yourself: [tdlib/td](https://github.com/tdlib/td#building)
+   - Or use the TDLib located in the `libs/` folder.
 
 ### 2. Configuration
 

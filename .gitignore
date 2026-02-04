@@ -54,7 +54,7 @@ bin/
 # =============================================
 # Keep native libs in .gitignore if they are large
 # or need to be downloaded separately
-libs/*.dll
+# libs/*.dll
 # libs/*.so
 # libs/*.dylib
 

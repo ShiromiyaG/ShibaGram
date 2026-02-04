@@ -238,14 +238,12 @@ This project is for educational purposes. Please respect Telegram's Terms of Ser
 - [TDLib](https://github.com/tdlib/td) - Telegram Database Library
 - [JetBrains](https://www.jetbrains.com/) - Kotlin & Compose Multiplatform
 - [VideoLAN](https://www.videolan.org/) - VLC Media Player
-- [Nicegram](https://github.com/nicegram) - TDLib prebuilt binaries
 
 ---
 
 <p align="center">
   Made with ❤️ by Shirou
 </p>
-- **UI Layer** - Compose screens and components
 
 ## Credits
 

@@ -22,32 +22,50 @@ object TdLib {
         if (isInitialized) return
         
         try {
-            // Get the class location to find the project root
-            val classPath = TdLib::class.java.protectionDomain?.codeSource?.location?.path ?: ""
-            val projectRoot = if (classPath.contains("build")) {
-                File(classPath).parentFile?.parentFile?.parentFile?.absolutePath ?: System.getProperty("user.dir")
-            } else {
-                System.getProperty("user.dir")
+            val userDir = System.getProperty("user.dir")
+            
+            // Detect the app directory from the executable location
+            // In jpackage, the EXE is at <appDir>/ShibaGram.exe and DLLs go next to the EXE
+            // The app jars are at <appDir>/app/
+            val exeDir = try {
+                // Get directory of the running process (where ShibaGram.exe lives)
+                val pid = ProcessHandle.current().pid()
+                val processPath = ProcessHandle.current().info().command().orElse(null)
+                if (processPath != null) File(processPath).parentFile?.absolutePath else null
+            } catch (e: Exception) {
+                null
             }
             
-            println("TDLib: Project root detected as: $projectRoot")
-            println("TDLib: user.dir is: ${System.getProperty("user.dir")}")
+            // Also try to find app dir from class path
+            val classPath = TdLib::class.java.protectionDomain?.codeSource?.location?.path ?: ""
+            val projectRoot = if (classPath.contains("build")) {
+                File(classPath).parentFile?.parentFile?.parentFile?.absolutePath ?: userDir
+            } else {
+                userDir
+            }
+
+            println("TDLib: user.dir is: $userDir")
+            println("TDLib: exe dir is: $exeDir")
+            println("TDLib: project root is: $projectRoot")
             
-            // Build list of possible paths for the libs folder (dependencies like libcrypto, libssl, zlib)
-            val libsFolders = listOf(
-                "$projectRoot/libs",
-                "${System.getProperty("user.dir")}/libs",
-                "F:/apkmod/echogram_decomp/ShibaGramTDLIB/libs"
-            )
+            // Build list of possible folders where the DLLs may be
+            val searchFolders = listOfNotNull(
+                exeDir,                          // next to ShibaGram.exe (packaged)
+                "$userDir/libs",                 // dev: project/libs
+                userDir,                         // dev: project root
+                "$projectRoot/libs",             // dev: from classPath
+                projectRoot                      // dev: project root
+            ).map { File(it) }.distinctBy { it.absolutePath }
+
+            println("TDLib: Search folders: ${searchFolders.map { "${it.absolutePath} (exists=${it.exists()})" }}")
             
             // Try to load dependencies first (OpenSSL and zlib)
-            for (libsFolder in libsFolders) {
-                val folder = File(libsFolder)
+            val deps = listOf("zlib1.dll", "libcrypto-3-x64.dll", "libssl-3-x64.dll")
+            for (folder in searchFolders) {
                 if (folder.exists() && folder.isDirectory) {
-                    println("TDLib: Found libs folder at: ${folder.absolutePath}")
-                    
-                    // Load dependencies in order
-                    val deps = listOf("zlib1.dll", "libcrypto-3-x64.dll", "libssl-3-x64.dll")
+                    val found = deps.any { File(folder, it).exists() }
+                    if (!found) continue
+                    println("TDLib: Loading dependencies from: ${folder.absolutePath}")
                     for (dep in deps) {
                         val depFile = File(folder, dep)
                         if (depFile.exists()) {
@@ -64,34 +82,22 @@ object TdLib {
             }
             
             // Build list of possible paths for tdjni.dll
-            val possiblePaths = mutableListOf<String>()
-            
-            // Add paths relative to project root
-            possiblePaths.add("$projectRoot/libs/tdjni.dll")
-            possiblePaths.add("$projectRoot/tdjni.dll")
-            
-            // Add paths relative to user.dir
-            val userDir = System.getProperty("user.dir")
-            possiblePaths.add("$userDir/libs/tdjni.dll")
-            possiblePaths.add("$userDir/tdjni.dll")
-            
-            // Also try absolute paths
-            possiblePaths.add("F:/apkmod/echogram_decomp/ShibaGramTDLIB/libs/tdjni.dll")
+            val possiblePaths = searchFolders
+                .filter { it.exists() && it.isDirectory }
+                .map { File(it, "tdjni.dll") }
             
             var loaded = false
-            // Try explicit paths only (avoid system path picking TDLight)
-            for (path in possiblePaths) {
-                try {
-                    val file = File(path)
-                    println("TDLib: Trying path: ${file.absolutePath} (exists: ${file.exists()})")
-                    if (file.exists()) {
+            for (file in possiblePaths) {
+                println("TDLib: Trying path: ${file.absolutePath} (exists: ${file.exists()})")
+                if (file.exists()) {
+                    try {
                         System.load(file.absolutePath)
                         loaded = true
                         println("TDLib: Successfully loaded from ${file.absolutePath}")
                         break
+                    } catch (e: UnsatisfiedLinkError) {
+                        println("TDLib: Failed to load from ${file.absolutePath}: ${e.message}")
                     }
-                } catch (e: UnsatisfiedLinkError) {
-                    println("TDLib: Failed to load from $path: ${e.message}")
                 }
             }
             

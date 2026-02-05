@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Local HTTP server for streaming Telegram videos to VLC.
- * Ported from Android EchoGram's VlcHttpServer.
+ * Ported from Android VlcHttpServer.
  */
 class VideoStreamingServer private constructor() : NanoHTTPD(0) {
     

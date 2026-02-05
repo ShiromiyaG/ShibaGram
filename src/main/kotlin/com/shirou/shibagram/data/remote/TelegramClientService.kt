@@ -1,5 +1,6 @@
 package com.shirou.shibagram.data.remote
 
+import com.shirou.shibagram.BuildConfig
 import com.shirou.shibagram.domain.model.*
 import com.shirou.shibagram.tdlib.TdLib
 import org.drinkless.tdlib.Client
@@ -40,6 +41,9 @@ class TelegramClientService : AutoCloseable {
     
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
+    @Volatile
+    private var tdlibParamsSet = false
+    
     private val sessionPath = Paths.get(System.getProperty("user.home"), ".ShibaGram", "session").toString()
     
     // Download location - uses system Downloads folder
@@ -48,9 +52,9 @@ class TelegramClientService : AutoCloseable {
     private var client: Client? = null
     
     companion object {
-        // You need to obtain your own API credentials from https://my.telegram.org
-        private const val API_ID = 0 // Replace with your API ID
-        private const val API_HASH = "0" // Replace with your API Hash
+        // API credentials loaded from .env at compile time
+        private const val API_ID = BuildConfig.TELEGRAM_API_ID
+        private const val API_HASH = BuildConfig.TELEGRAM_API_HASH
         
         @Volatile
         private var instance: TelegramClientService? = null
@@ -127,24 +131,30 @@ class TelegramClientService : AutoCloseable {
                 // Ensure download directory exists
                 java.io.File(downloadPath).mkdirs()
                 
-                // Send TDLib parameters
-                scope.launch {
-                    val params = SetTdlibParameters().apply {
-                        databaseDirectory = "$sessionPath/data"
-                        filesDirectory = downloadPath // Use Downloads/ShibaGram folder
-                        useFileDatabase = true
-                        useChatInfoDatabase = true
-                        useMessageDatabase = true
-                        useSecretChats = false
-                        apiId = API_ID
-                        apiHash = API_HASH
-                        systemLanguageCode = "en"
-                        deviceModel = "Desktop"
-                        systemVersion = System.getProperty("os.name")
-                        applicationVersion = "1.0.0"
-                    }
-                    sendAsync(params)
+                // Send TDLib parameters immediately (non-blocking send)
+                val params = SetTdlibParameters().apply {
+                    databaseDirectory = "$sessionPath/data"
+                    filesDirectory = downloadPath // Use Downloads/ShibaGram folder
+                    useFileDatabase = true
+                    useChatInfoDatabase = true
+                    useMessageDatabase = true
+                    useSecretChats = false
+                    apiId = API_ID
+                    apiHash = API_HASH
+                    systemLanguageCode = "en"
+                    deviceModel = "Desktop"
+                    systemVersion = System.getProperty("os.name")
+                    applicationVersion = "1.0.0"
                 }
+                client?.send(params, { response ->
+                    if (response is Error) {
+                        println("TDLib: Failed to set parameters: ${response.message}")
+                        _authState.value = AuthState.Error("Failed to initialize: ${response.message}")
+                    } else {
+                        tdlibParamsSet = true
+                        println("TDLib: Parameters set successfully")
+                    }
+                })
             }
             is AuthorizationStateWaitPhoneNumber -> {
                 _authState.value = AuthState.WaitingForPhoneNumber
@@ -236,6 +246,17 @@ class TelegramClientService : AutoCloseable {
     
     suspend fun requestQRCode(): String? = withContext(Dispatchers.IO) {
         try {
+            // Wait for TDLib parameters to be set before requesting QR code
+            var retries = 0
+            while (!tdlibParamsSet && retries < 50) {
+                delay(100)
+                retries++
+            }
+            if (!tdlibParamsSet) {
+                _authState.value = AuthState.Error("TDLib initialization timeout. Please restart the app.")
+                return@withContext null
+            }
+            
             _authState.value = AuthState.QRLoginInProgress
             val response = sendAsync(RequestQrCodeAuthentication().apply {
                 otherUserIds = longArrayOf()

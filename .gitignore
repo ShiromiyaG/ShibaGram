@@ -109,6 +109,7 @@ shibagram.db
 # Credentials & Secrets
 # =============================================
 # Never commit API keys or credentials!
+.env
 secrets.properties
 local.properties
 *.keystore

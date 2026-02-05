@@ -244,10 +244,3 @@ This project is for educational purposes. Please respect Telegram's Terms of Ser
   Made with ❤️ by Shirou
 </p>
 
-## Credits
-
-This project is a Kotlin Desktop port of the original Android ShibaGram app, maintaining maximum code compatibility while adapting to desktop-specific features.
-
-## License
-
-MIT License

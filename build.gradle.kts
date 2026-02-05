@@ -9,6 +9,50 @@ plugins {
 group = "com.shirou.shibagram"
 version = "1.0.0"
 
+// --------------- Load .env file ---------------
+fun loadEnv(): Map<String, String> {
+    val envFile = rootProject.file(".env")
+    if (!envFile.exists()) return emptyMap()
+    return envFile.readLines()
+        .filter { it.isNotBlank() && !it.startsWith("#") && it.contains("=") }
+        .associate {
+            val (key, value) = it.split("=", limit = 2)
+            key.trim() to value.trim()
+        }
+}
+
+val env = loadEnv()
+val telegramApiId: String = env["TELEGRAM_API_ID"] ?: System.getenv("TELEGRAM_API_ID") ?: "0"
+val telegramApiHash: String = env["TELEGRAM_API_HASH"] ?: System.getenv("TELEGRAM_API_HASH") ?: "0"
+
+// --------------- Generate BuildConfig.kt ---------------
+val generateBuildConfig by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/sources/buildConfig/kotlin/main")
+    outputs.dir(outputDir)
+    doLast {
+        val dir = outputDir.get().asFile.resolve("com/shirou/shibagram")
+        dir.mkdirs()
+        dir.resolve("BuildConfig.kt").writeText(
+            """
+            |package com.shirou.shibagram
+            |
+            |object BuildConfig {
+            |    const val TELEGRAM_API_ID: Int = $telegramApiId
+            |    const val TELEGRAM_API_HASH: String = "$telegramApiHash"
+            |}
+            """.trimMargin()
+        )
+    }
+}
+
+sourceSets.main {
+    kotlin.srcDir(layout.buildDirectory.dir("generated/sources/buildConfig/kotlin/main"))
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(generateBuildConfig)
+}
+
 repositories {
     mavenCentral()
     maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
@@ -82,6 +126,22 @@ compose.desktop {
                 upgradeUuid = "61DAB35E-17CB-43B0-81D5-B30D1AA6E2C3"
                 iconFile.set(project.file("src/main/resources/icon.ico"))
             }
+        }
+    }
+}
+
+// Copy native DLLs from libs/ into the app image after createDistributable
+tasks.matching { it.name == "createDistributable" }.configureEach {
+    doLast {
+        val appDir = layout.buildDirectory.dir("compose/binaries/main/app/ShibaGram").get().asFile
+        if (appDir.exists()) {
+            project.copy {
+                from(project.file("libs")) {
+                    include("*.dll")
+                }
+                into(appDir)
+            }
+            println("Native DLLs copied to: ${appDir.absolutePath}")
         }
     }
 }

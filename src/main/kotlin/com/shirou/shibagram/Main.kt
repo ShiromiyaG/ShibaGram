@@ -15,6 +15,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.*
 import com.shirou.shibagram.data.remote.TelegramClientService
+import com.shirou.shibagram.data.local.VideoCacheManager
 import com.shirou.shibagram.data.repository.ChannelMessagesRepository
 import com.shirou.shibagram.data.repository.TelegramAuthRepository
 import com.shirou.shibagram.data.repository.TelegramChannelsRepository
@@ -37,6 +38,7 @@ import javax.imageio.ImageIO
  */
 fun main() = application {
     var isFullscreen by remember { mutableStateOf(false) }
+    var isVideoPlaying by remember { mutableStateOf(false) }
     
     val windowState = rememberWindowState(
         placement = WindowPlacement.Floating,
@@ -47,6 +49,14 @@ fun main() = application {
     // Update window placement when fullscreen changes
     LaunchedEffect(isFullscreen) {
         windowState.placement = if (isFullscreen) WindowPlacement.Fullscreen else WindowPlacement.Floating
+    }
+    
+    // Prevent window from minimizing when video player is active
+    LaunchedEffect(isVideoPlaying, windowState.isMinimized) {
+        if (isVideoPlaying && windowState.isMinimized) {
+            // Immediately restore the window when it gets minimized during video playback
+            windowState.isMinimized = false
+        }
     }
     
     // Load app icon
@@ -64,9 +74,40 @@ fun main() = application {
     ) {
         window.minimumSize = Dimension(800, 600)
         
+        // Add window focus listener to prevent minimization during video playback
+        DisposableEffect(Unit) {
+            val windowFocusListener = object : java.awt.event.WindowAdapter() {
+                override fun windowDeactivated(e: java.awt.event.WindowEvent?) {
+                    // When the window loses focus while video is playing,
+                    // ensure it stays visible (not minimized)
+                    if (isVideoPlaying) {
+                        javax.swing.SwingUtilities.invokeLater {
+                            if (window.state == java.awt.Frame.ICONIFIED) {
+                                window.state = java.awt.Frame.NORMAL
+                            }
+                        }
+                    }
+                }
+                
+                override fun windowIconified(e: java.awt.event.WindowEvent?) {
+                    // Prevent iconification (minimize) when video is playing
+                    if (isVideoPlaying) {
+                        javax.swing.SwingUtilities.invokeLater {
+                            window.state = java.awt.Frame.NORMAL
+                        }
+                    }
+                }
+            }
+            window.addWindowListener(windowFocusListener)
+            onDispose {
+                window.removeWindowListener(windowFocusListener)
+            }
+        }
+        
         ShibaGramApp(
             isFullscreen = isFullscreen,
-            onFullscreenChange = { isFullscreen = it }
+            onFullscreenChange = { isFullscreen = it },
+            onVideoPlayingChange = { isVideoPlaying = it }
         )
     }
 }
@@ -75,7 +116,8 @@ fun main() = application {
 @Composable
 fun ShibaGramApp(
     isFullscreen: Boolean = false,
-    onFullscreenChange: (Boolean) -> Unit = {}
+    onFullscreenChange: (Boolean) -> Unit = {},
+    onVideoPlayingChange: (Boolean) -> Unit = {}
 ) {
     // State
     var isDarkTheme by remember { mutableStateOf(false) }
@@ -93,6 +135,11 @@ fun ShibaGramApp(
     
     // VLC Player
     val vlcPlayer = remember { VlcMediaPlayer() }
+    
+    // Video cache manager
+    val cacheManager = remember { VideoCacheManager.getInstance() }
+    var maxCacheSizeGb by remember { mutableStateOf(2f) } // Default 2 GB
+    var currentCacheSize by remember { mutableStateOf("Calculating...") }
     val isVlcPlaying by vlcPlayer.isPlaying.collectAsState()
     val vlcPosition by vlcPlayer.currentPosition.collectAsState()
     val vlcDuration by vlcPlayer.duration.collectAsState()
@@ -152,6 +199,11 @@ fun ShibaGramApp(
     var autoPlayNext by remember { mutableStateOf(true) }
     var downloadPath by remember { mutableStateOf(java.nio.file.Paths.get(System.getProperty("user.home"), "Downloads", "ShibaGram").toString()) }
     
+    // Notify parent about video playing state changes
+    LaunchedEffect(currentPlayingVideo) {
+        onVideoPlayingChange(currentPlayingVideo != null)
+    }
+    
     // Continue watching and saved videos from repository
     val continueWatchingVideos by watchHistoryRepository.continueWatchingVideos.collectAsState()
     val savedVideos by watchHistoryRepository.savedVideos.collectAsState()
@@ -170,6 +222,19 @@ fun ShibaGramApp(
         }
     }
     
+    // Filtered channels based on search
+    val filteredChannels = remember(channels, searchQuery) {
+        if (searchQuery.isBlank()) channels
+        else channels.filter { channel ->
+            channel.name.contains(searchQuery, ignoreCase = true) ||
+            channel.description?.contains(searchQuery, ignoreCase = true) == true
+        }
+    }
+    
+    // Search results from TDLib API (for cross-channel video search)
+    var searchResults by remember { mutableStateOf<List<MediaMessage>>(emptyList()) }
+    var isSearching by remember { mutableStateOf(false) }
+    
     // Coroutine scope
     val scope = rememberCoroutineScope()
     
@@ -178,6 +243,15 @@ fun ShibaGramApp(
         authRepository.initialize()
         watchHistoryRepository.loadContinueWatching()
         watchHistoryRepository.loadSavedVideos()
+        
+        // Start cache manager monitoring
+        cacheManager.startMonitoring()
+        currentCacheSize = cacheManager.getFormattedCacheSize()
+    }
+    
+    // Update cache manager limit when setting changes
+    LaunchedEffect(maxCacheSizeGb) {
+        cacheManager.maxCacheSizeBytes = (maxCacheSizeGb * 1024 * 1024 * 1024).toLong()
     }
     
     // Save playback progress periodically
@@ -192,6 +266,27 @@ fun ShibaGramApp(
                 duration = vlcDuration
             )
         }
+    }
+    
+    // Perform search across channels when query changes (debounced)
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.isBlank()) {
+            searchResults = emptyList()
+            isSearching = false
+            return@LaunchedEffect
+        }
+        isSearching = true
+        kotlinx.coroutines.delay(300) // debounce
+        try {
+            val chatId = if (selectedNavIndex == 1) selectedChannel?.id else null
+            telegramClient.searchMessages(searchQuery, chatId, limit = 50)
+                .collect { results ->
+                    searchResults = results
+                }
+        } catch (e: Exception) {
+            println("Search error: ${e.message}")
+        }
+        isSearching = false
     }
     
     // Track active data provider for cleanup
@@ -271,6 +366,8 @@ fun ShibaGramApp(
             activeDataProvider?.close()
             activeDataProvider = null
             if (vlcInitialized) vlcPlayer.stop()
+            // Trigger cache cleanup after video stops
+            cacheManager.triggerCleanup()
         }
     }
     
@@ -432,10 +529,12 @@ fun ShibaGramApp(
                                     com.shirou.shibagram.ui.components.SearchBar(
                                         query = searchQuery,
                                         onQueryChange = { searchQuery = it },
-                                        onSearch = { /* Search is reactive */ },
+                                        onSearch = { /* Search is reactive via LaunchedEffect */ },
                                         onClose = { 
                                             showSearch = false
                                             searchQuery = ""
+                                            searchResults = emptyList()
+                                            isSearching = false
                                         },
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                     )
@@ -446,8 +545,20 @@ fun ShibaGramApp(
                                 // Screen content
                                 when (selectedNavIndex) {
                                     0 -> HomeScreen(
-                                        recentVideos = channels.take(5).map { channel ->
-                                            channel to filteredVideos.filter { it.chatId == channel.id }.take(10)
+                                        recentVideos = if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
+                                            // Group search results by channel
+                                            val groupedResults = searchResults.groupBy { it.chatId }
+                                            groupedResults.entries.map { (chatId, videos) ->
+                                                val channel = channels.find { it.id == chatId } ?: Channel(
+                                                    id = chatId,
+                                                    name = "Channel"
+                                                )
+                                                channel to videos
+                                            }
+                                        } else {
+                                            channels.take(5).map { channel ->
+                                                channel to filteredVideos.filter { it.chatId == channel.id }.take(10)
+                                            }
                                         },
                                         continueWatchingVideos = continueWatchingVideos,
                                         savedVideos = savedVideos,
@@ -483,9 +594,15 @@ fun ShibaGramApp(
                                     )
                                     
                                     1 -> ChannelsScreen(
-                                        channels = channels,
+                                        channels = filteredChannels,
                                         selectedChannel = selectedChannel,
-                                        videos = filteredVideos,
+                                        videos = if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
+                                            // When searching, show search results (filtered to selected channel if one is selected)
+                                            if (selectedChannel != null) {
+                                                (searchResults.filter { it.chatId == selectedChannel!!.id } + filteredVideos)
+                                                    .distinctBy { it.id }
+                                            } else searchResults
+                                        } else filteredVideos,
                                         onChannelSelect = { selectedChannel = it },
                                         onVideoClick = { video ->
                                             currentPlayingVideo = video
@@ -518,30 +635,16 @@ fun ShibaGramApp(
                                                 authRepository.logout()
                                             }
                                         },
+                                        maxCacheSizeGb = maxCacheSizeGb,
+                                        onMaxCacheSizeChange = { maxCacheSizeGb = it },
+                                        currentCacheSize = currentCacheSize,
                                         onClearCacheClick = { 
                                             // Clear telegram cache and downloaded videos
                                             scope.launch {
                                                 try {
-                                                    // Clear cache directory
-                                                    val cacheDir = java.io.File(System.getProperty("user.home"), ".ShibaGram/cache")
-                                                    if (cacheDir.exists()) {
-                                                        cacheDir.deleteRecursively()
-                                                    }
-                                                    
-                                                    // Clear session downloads (videos, thumbnails, temp files)
-                                                    val sessionDownloads = java.io.File(System.getProperty("user.home"), ".ShibaGram/session/downloads")
-                                                    if (sessionDownloads.exists()) {
-                                                        sessionDownloads.deleteRecursively()
-                                                        sessionDownloads.mkdirs() // Recreate empty folder
-                                                    }
-                                                    
-                                                    // Clear Downloads/ShibaGram folder
-                                                    val downloadsDir = java.io.File(System.getProperty("user.home"), "Downloads/ShibaGram")
-                                                    if (downloadsDir.exists()) {
-                                                        downloadsDir.deleteRecursively()
-                                                    }
-                                                    
-                                                    println("Cache and downloads cleared successfully")
+                                                    cacheManager.clearAllCache()
+                                                    currentCacheSize = cacheManager.getFormattedCacheSize()
+                                                    println("Cache cleared successfully")
                                                 } catch (e: Exception) {
                                                     println("Error clearing cache: ${e.message}")
                                                 }

@@ -692,6 +692,190 @@ class TelegramClientService : AutoCloseable {
         awaitClose()
     }
     
+    /**
+     * Search for channels/chats by name from the loaded channels list.
+     */
+    fun searchChannelsByName(query: String): List<Channel> {
+        if (query.isBlank()) return _channels.value
+        return _channels.value.filter { channel ->
+            channel.name.contains(query, ignoreCase = true) ||
+            channel.description?.contains(query, ignoreCase = true) == true
+        }
+    }
+    
+    /**
+     * Search messages across all chats or a specific chat.
+     * Uses TDLib SearchMessages for global search.
+     */
+    fun searchMessages(query: String, chatId: Long? = null, limit: Int = 50): Flow<List<MediaMessage>> = callbackFlow {
+        if (query.isBlank()) {
+            trySend(emptyList())
+            close()
+            return@callbackFlow
+        }
+        
+        val results = mutableListOf<MediaMessage>()
+        
+        fun isVideoFile(mimeType: String?, fileName: String?): Boolean {
+            if (mimeType?.startsWith("video/") == true) return true
+            val extension = fileName?.substringAfterLast(".", "")?.lowercase() ?: ""
+            return extension in listOf("mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpeg", "mpg")
+        }
+        
+        try {
+            if (chatId != null) {
+                // Search within a specific chat
+                val response = sendAsync(SearchChatMessages().apply {
+                    this.chatId = chatId
+                    this.query = query
+                    this.limit = limit
+                    this.fromMessageId = 0L
+                    this.filter = SearchMessagesFilterVideo()
+                })
+                
+                if (response is FoundChatMessages) {
+                    for (msg in response.messages) {
+                        val content = msg.content
+                        if (content is MessageVideo) {
+                            val video = content.video
+                            val file = video.video
+                            val local = file.local
+                            val thumbnail = video.thumbnail
+                            var thumbnailPath = thumbnail?.file?.local?.path?.takeIf { it.isNotEmpty() }
+                            
+                            results.add(MediaMessage(
+                                id = msg.id,
+                                date = msg.date,
+                                videoFile = VideoFile(
+                                    id = file.id,
+                                    size = file.size,
+                                    downloadedSize = local.downloadedSize,
+                                    localPath = local.path?.takeIf { it.isNotEmpty() },
+                                    isDownloading = local.isDownloadingActive,
+                                    isDownloaded = local.isDownloadingCompleted
+                                ),
+                                filename = video.fileName,
+                                thumbnailFileId = thumbnail?.file?.id,
+                                thumbnail = thumbnailPath,
+                                duration = video.duration,
+                                width = video.width,
+                                height = video.height,
+                                caption = content.caption?.text,
+                                mimeType = video.mimeType ?: "",
+                                chatId = msg.chatId,
+                                title = video.fileName ?: "Video"
+                            ))
+                        }
+                    }
+                }
+                
+                // Also search documents that are video files
+                val docResponse = sendAsync(SearchChatMessages().apply {
+                    this.chatId = chatId
+                    this.query = query
+                    this.limit = limit
+                    this.fromMessageId = 0L
+                    this.filter = SearchMessagesFilterDocument()
+                })
+                
+                if (docResponse is FoundChatMessages) {
+                    for (msg in docResponse.messages) {
+                        val content = msg.content
+                        if (content is MessageDocument) {
+                            val doc = content.document
+                            if (isVideoFile(doc.mimeType, doc.fileName)) {
+                                val file = doc.document
+                                val local = file.local
+                                val thumbnail = doc.thumbnail
+                                var thumbnailPath = thumbnail?.file?.local?.path?.takeIf { it.isNotEmpty() }
+                                
+                                results.add(MediaMessage(
+                                    id = msg.id,
+                                    date = msg.date,
+                                    videoFile = VideoFile(
+                                        id = file.id,
+                                        size = file.size,
+                                        downloadedSize = local.downloadedSize,
+                                        localPath = local.path?.takeIf { it.isNotEmpty() },
+                                        isDownloading = local.isDownloadingActive,
+                                        isDownloaded = local.isDownloadingCompleted
+                                    ),
+                                    filename = doc.fileName,
+                                    thumbnailFileId = thumbnail?.file?.id,
+                                    thumbnail = thumbnailPath,
+                                    caption = content.caption?.text,
+                                    mimeType = doc.mimeType ?: "",
+                                    chatId = msg.chatId,
+                                    title = doc.fileName ?: "Document"
+                                ))
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Global search across all chats
+                for (channel in _channels.value.take(20)) {
+                    try {
+                        val response = sendAsync(SearchChatMessages().apply {
+                            this.chatId = channel.id
+                            this.query = query
+                            this.limit = 10
+                            this.fromMessageId = 0L
+                            this.filter = SearchMessagesFilterVideo()
+                        })
+                        
+                        if (response is FoundChatMessages) {
+                            for (msg in response.messages) {
+                                val content = msg.content
+                                if (content is MessageVideo) {
+                                    val video = content.video
+                                    val file = video.video
+                                    val local = file.local
+                                    val thumbnail = video.thumbnail
+                                    var thumbnailPath = thumbnail?.file?.local?.path?.takeIf { it.isNotEmpty() }
+                                    
+                                    results.add(MediaMessage(
+                                        id = msg.id,
+                                        date = msg.date,
+                                        videoFile = VideoFile(
+                                            id = file.id,
+                                            size = file.size,
+                                            downloadedSize = local.downloadedSize,
+                                            localPath = local.path?.takeIf { it.isNotEmpty() },
+                                            isDownloading = local.isDownloadingActive,
+                                            isDownloaded = local.isDownloadingCompleted
+                                        ),
+                                        filename = video.fileName,
+                                        thumbnailFileId = thumbnail?.file?.id,
+                                        thumbnail = thumbnailPath,
+                                        duration = video.duration,
+                                        width = video.width,
+                                        height = video.height,
+                                        caption = content.caption?.text,
+                                        mimeType = video.mimeType ?: "",
+                                        chatId = msg.chatId,
+                                        title = video.fileName ?: "Video"
+                                    ))
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Skip failed channels
+                    }
+                    
+                    if (results.size >= limit) break
+                }
+            }
+            
+            trySend(results.sortedByDescending { it.date })
+        } catch (e: Exception) {
+            println("Error searching messages: ${e.message}")
+            trySend(emptyList())
+        }
+        
+        close()
+    }
+    
     override fun close() {
         scope.cancel()
     }

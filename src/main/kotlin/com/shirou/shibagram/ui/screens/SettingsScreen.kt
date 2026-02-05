@@ -28,7 +28,10 @@ fun SettingsScreen(
     autoPlayNext: Boolean = true,
     onAutoPlayNextChange: (Boolean) -> Unit = {},
     downloadPath: String = Paths.get(System.getProperty("user.home"), "Downloads", "ShibaGram").toString(),
-    onDownloadPathChange: (String) -> Unit = {}
+    onDownloadPathChange: (String) -> Unit = {},
+    maxCacheSizeGb: Float = 2f,
+    onMaxCacheSizeChange: (Float) -> Unit = {},
+    currentCacheSize: String = "Unknown"
 ) {
     val scrollState = rememberScrollState()
     var showLogoutDialog by remember { mutableStateOf(false) }
@@ -76,9 +79,50 @@ fun SettingsScreen(
             SettingsItem(
                 icon = Icons.Default.Storage,
                 title = if (cacheCleared) "Cache cleared" else "Clear cache",
-                subtitle = if (cacheCleared) "All cache and downloads deleted" else "Free up storage space (includes downloaded videos)",
+                subtitle = if (cacheCleared) "All cache and downloads deleted" else "Current cache: $currentCacheSize"
+            ,
                 onClick = { showClearCacheDialog = true }
             )
+            
+            // Cache size limit slider
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DataUsage,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Max cache size",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Limit: ${String.format("%.1f", maxCacheSizeGb)} GB — Old videos are auto-removed when exceeded",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Slider(
+                    value = maxCacheSizeGb,
+                    onValueChange = onMaxCacheSizeChange,
+                    valueRange = 0.5f..20f,
+                    steps = 38, // 0.5 GB increments
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 40.dp)
+                )
+            }
             
             SettingsItem(
                 icon = Icons.Default.Folder,

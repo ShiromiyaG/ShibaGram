@@ -75,14 +75,7 @@
 
 ### 2. Configuration
 
-Edit `src/main/kotlin/com/shirou/shibagram/data/remote/TelegramClientService.kt`:
-
-```kotlin
-companion object {
-    private const val API_ID = 12345678           // Your API ID
-    private const val API_HASH = "your_api_hash"  // Your API Hash
-}
-```
+Rename `.env.example` to `.env` and edit its content.
 
 ### 3. Build & Run
 

@@ -2,6 +2,7 @@ package com.shirou.shibagram.vlc
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import com.shirou.shibagram.player.MediaPlayerEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
@@ -23,13 +24,13 @@ import java.nio.IntBuffer
  * VLC media player wrapper for desktop video playback.
  * Uses callback rendering to expose frames as Compose ImageBitmap.
  */
-class VlcMediaPlayer {
+class VlcMediaPlayer : MediaPlayerEngine {
     private var mediaPlayerFactory: MediaPlayerFactory? = null
     private var mediaPlayer: EmbeddedMediaPlayer? = null
     
     // Video frame as Compose ImageBitmap for direct rendering
     private val _currentFrame = MutableStateFlow<ImageBitmap?>(null)
-    val currentFrame: StateFlow<ImageBitmap?> = _currentFrame
+    override val currentFrame: StateFlow<ImageBitmap?> = _currentFrame
     
     private var frameBuffer: BufferedImage? = null
     private var pixelBuffer: IntArray? = null
@@ -39,29 +40,29 @@ class VlcMediaPlayer {
     private val FRAME_SKIP = 1 // Render every N frames (1 = all frames)
     
     private val _isPlaying = MutableStateFlow(false)
-    val isPlaying: StateFlow<Boolean> = _isPlaying
+    override val isPlaying: StateFlow<Boolean> = _isPlaying
     
     private val _currentPosition = MutableStateFlow(0L)
-    val currentPosition: StateFlow<Long> = _currentPosition
+    override val currentPosition: StateFlow<Long> = _currentPosition
     
     private val _duration = MutableStateFlow(0L)
-    val duration: StateFlow<Long> = _duration
+    override val duration: StateFlow<Long> = _duration
     
     private val _volume = MutableStateFlow(1f)
-    val volume: StateFlow<Float> = _volume
+    override val volume: StateFlow<Float> = _volume
     
     private val _isBuffering = MutableStateFlow(false)
-    val isBuffering: StateFlow<Boolean> = _isBuffering
+    override val isBuffering: StateFlow<Boolean> = _isBuffering
     
     private var vlcFound = false
     
-    var onMediaEnd: (() -> Unit)? = null
-    var onError: ((String) -> Unit)? = null
+    override var onMediaEnd: (() -> Unit)? = null
+    override var onError: ((String) -> Unit)? = null
     
     /**
      * Initialize VLC - returns true if successful
      */
-    fun initialize(): Boolean {
+    override fun initialize(): Boolean {
         return try {
             // Discover VLC installation
             vlcFound = NativeDiscovery().discover()
@@ -217,7 +218,7 @@ class VlcMediaPlayer {
      */
     fun getVideoSurface(): Component? = null
 
-    fun play(mediaPath: String) {
+    override fun play(mediaPath: String) {
         try {
             // Check if this is an HTTP stream and add appropriate options
             if (mediaPath.startsWith("http://") || mediaPath.startsWith("https://")) {
@@ -248,15 +249,15 @@ class VlcMediaPlayer {
         }
     }
     
-    fun pause() {
+    override fun pause() {
         mediaPlayer?.controls()?.pause()
     }
     
-    fun resume() {
+    override fun resume() {
         mediaPlayer?.controls()?.play()
     }
     
-    fun togglePlayPause() {
+    override fun togglePlayPause() {
         if (_isPlaying.value) {
             pause()
         } else {
@@ -264,11 +265,11 @@ class VlcMediaPlayer {
         }
     }
     
-    fun stop() {
+    override fun stop() {
         mediaPlayer?.controls()?.stop()
     }
     
-    fun seekTo(position: Long) {
+    override fun seekTo(position: Long) {
         mediaPlayer?.controls()?.setTime(position)
     }
     
@@ -276,7 +277,7 @@ class VlcMediaPlayer {
         mediaPlayer?.controls()?.setPosition(percentage)
     }
     
-    fun setVolume(vol: Float) {
+    override fun setVolume(vol: Float) {
         val volumeInt = (vol * 100).toInt().coerceIn(0, 100)
         mediaPlayer?.audio()?.setVolume(volumeInt)
         _volume.value = vol
@@ -296,18 +297,18 @@ class VlcMediaPlayer {
         }
     }
     
-    fun setPlaybackSpeed(speed: Float) {
+    override fun setPlaybackSpeed(speed: Float) {
         mediaPlayer?.controls()?.setRate(speed)
     }
     
     /**
      * Get list of available audio tracks
      */
-    fun getAudioTracks(): List<TrackInfo> {
+    override fun getAudioTracks(): List<MediaPlayerEngine.TrackInfo> {
         return try {
             val trackDescriptions = mediaPlayer?.audio()?.trackDescriptions() ?: emptyList()
             trackDescriptions.map { desc ->
-                TrackInfo(
+                MediaPlayerEngine.TrackInfo(
                     id = desc.id(),
                     name = desc.description() ?: "Track ${desc.id()}"
                 )
@@ -320,7 +321,7 @@ class VlcMediaPlayer {
     /**
      * Get current audio track ID
      */
-    fun getCurrentAudioTrack(): Int {
+    override fun getCurrentAudioTrack(): Int {
         return try {
             mediaPlayer?.audio()?.track() ?: -1
         } catch (e: Exception) {
@@ -331,7 +332,7 @@ class VlcMediaPlayer {
     /**
      * Set audio track by ID
      */
-    fun setAudioTrack(trackId: Int) {
+    override fun setAudioTrack(trackId: Int) {
         try {
             mediaPlayer?.audio()?.setTrack(trackId)
         } catch (e: Exception) {
@@ -342,11 +343,11 @@ class VlcMediaPlayer {
     /**
      * Get list of available subtitle tracks
      */
-    fun getSubtitleTracks(): List<TrackInfo> {
+    override fun getSubtitleTracks(): List<MediaPlayerEngine.TrackInfo> {
         return try {
             val trackDescriptions = mediaPlayer?.subpictures()?.trackDescriptions() ?: emptyList()
             trackDescriptions.map { desc ->
-                TrackInfo(
+                MediaPlayerEngine.TrackInfo(
                     id = desc.id(),
                     name = desc.description() ?: "Subtitle ${desc.id()}"
                 )
@@ -359,7 +360,7 @@ class VlcMediaPlayer {
     /**
      * Get current subtitle track ID (-1 means disabled)
      */
-    fun getCurrentSubtitleTrack(): Int {
+    override fun getCurrentSubtitleTrack(): Int {
         return try {
             mediaPlayer?.subpictures()?.track() ?: -1
         } catch (e: Exception) {
@@ -370,7 +371,7 @@ class VlcMediaPlayer {
     /**
      * Set subtitle track by ID (-1 to disable)
      */
-    fun setSubtitleTrack(trackId: Int) {
+    override fun setSubtitleTrack(trackId: Int) {
         try {
             mediaPlayer?.subpictures()?.setTrack(trackId)
         } catch (e: Exception) {
@@ -379,18 +380,15 @@ class VlcMediaPlayer {
     }
     
     /**
-     * Data class for track information
+     * Data class for track information — delegates to MediaPlayerEngine.TrackInfo
      */
-    data class TrackInfo(
-        val id: Int,
-        val name: String
-    )
+    // TrackInfo is now defined in MediaPlayerEngine interface
     
     fun getSnapshot(): java.awt.image.BufferedImage? {
         return mediaPlayer?.snapshots()?.get()
     }
     
-    fun release() {
+    override fun release() {
         mediaPlayer?.controls()?.stop()
         mediaPlayer?.release()
         mediaPlayerFactory?.release()
@@ -400,5 +398,5 @@ class VlcMediaPlayer {
         _currentFrame.value = null
     }
     
-    fun isInitialized(): Boolean = mediaPlayer != null && vlcFound
+    override fun isInitialized(): Boolean = mediaPlayer != null && vlcFound
 }

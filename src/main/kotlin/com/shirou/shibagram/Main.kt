@@ -20,6 +20,8 @@ import com.shirou.shibagram.data.repository.ChannelMessagesRepository
 import com.shirou.shibagram.data.repository.TelegramAuthRepository
 import com.shirou.shibagram.data.repository.TelegramChannelsRepository
 import com.shirou.shibagram.domain.model.*
+import com.shirou.shibagram.player.MediaPlayerEngine
+import com.shirou.shibagram.player.MpvMediaPlayer
 import com.shirou.shibagram.streaming.TelegramVideoDataProvider
 import com.shirou.shibagram.streaming.VideoStreamingServer
 import com.shirou.shibagram.ui.components.ShibaGramNavigationRail
@@ -138,47 +140,79 @@ fun ShibaGramApp(
     val watchHistoryRepository = remember { com.shirou.shibagram.data.repository.WatchHistoryRepository() }
     val telegramClient = remember { TelegramClientService.getInstance() }
     
-    // VLC Player
-    val vlcPlayer = remember { VlcMediaPlayer() }
-    
+    // Player preferences (persisted)
+    val userPrefs = remember { com.shirou.shibagram.data.preferences.UserPreferencesRepository.getInstance() }
+    var playerType by remember { mutableStateOf(userPrefs.playerType) }
+    var mpvPath by remember { mutableStateOf(userPrefs.mpvPath) }
+
+    // MPV controls visibility (managed here because Canvas mouse listener lives here)
+    var showMpvControls by remember { mutableStateOf(true) }
+    var mpvInteractionKey by remember { mutableStateOf(0) }
+
+    // Active player engine (VLC or MPV) — recreated when player type changes
+    val activePlayer: MediaPlayerEngine = remember(playerType, mpvPath) {
+        when (playerType) {
+            PlayerType.VLC -> VlcMediaPlayer()
+            PlayerType.MPV -> MpvMediaPlayer(mpvPath.takeIf { it.isNotBlank() })
+        }
+    }
+
     // Video cache manager
     val cacheManager = remember { VideoCacheManager.getInstance() }
     var maxCacheSizeGb by remember { mutableStateOf(2f) } // Default 2 GB
     var currentCacheSize by remember { mutableStateOf("Calculating...") }
-    val isVlcPlaying by vlcPlayer.isPlaying.collectAsState()
-    val vlcPosition by vlcPlayer.currentPosition.collectAsState()
-    val vlcDuration by vlcPlayer.duration.collectAsState()
-    val vlcVolume by vlcPlayer.volume.collectAsState()
-    val vlcFrame by vlcPlayer.currentFrame.collectAsState()
-    var vlcInitialized by remember { mutableStateOf(false) }
-    var vlcError by remember { mutableStateOf<String?>(null) }
+
+    // Auto-hide MPV controls 3s after last interaction while playing
+    val isPlayerPlaying by activePlayer.isPlaying.collectAsState()
+    val playerPosition by activePlayer.currentPosition.collectAsState()
+    val playerDuration by activePlayer.duration.collectAsState()
+    val playerVolume by activePlayer.volume.collectAsState()
+    val playerFrame by activePlayer.currentFrame.collectAsState()
+    var playerInitialized by remember { mutableStateOf(false) }
+    var playerError by remember { mutableStateOf<String?>(null) }
     
     // Audio and subtitle tracks state
-    var audioTracks by remember { mutableStateOf<List<VlcMediaPlayer.TrackInfo>>(emptyList()) }
+    var audioTracks by remember { mutableStateOf<List<MediaPlayerEngine.TrackInfo>>(emptyList()) }
     var currentAudioTrack by remember { mutableStateOf(-1) }
-    var subtitleTracks by remember { mutableStateOf<List<VlcMediaPlayer.TrackInfo>>(emptyList()) }
+    var subtitleTracks by remember { mutableStateOf<List<MediaPlayerEngine.TrackInfo>>(emptyList()) }
     var currentSubtitleTrack by remember { mutableStateOf(-1) }
     var playbackSpeed by remember { mutableStateOf(1f) }
-    
+
+    // MPV controls: auto-hide 3s after last interaction while playing
+    LaunchedEffect(showMpvControls, isPlayerPlaying, mpvInteractionKey) {
+        if (showMpvControls && isPlayerPlaying && activePlayer.rendersToWindow) {
+            delay(3000)
+            showMpvControls = false
+        }
+    }
+
     // Update tracks when video starts playing
-    LaunchedEffect(isVlcPlaying, vlcDuration) {
-        if (isVlcPlaying && vlcDuration > 0) {
-            // Small delay to let VLC load track info
+    LaunchedEffect(isPlayerPlaying, playerDuration, activePlayer) {
+        if (isPlayerPlaying && playerDuration > 0) {
+            // Small delay to let player load track info
             kotlinx.coroutines.delay(500)
-            audioTracks = vlcPlayer.getAudioTracks()
-            currentAudioTrack = vlcPlayer.getCurrentAudioTrack()
-            subtitleTracks = vlcPlayer.getSubtitleTracks()
-            currentSubtitleTrack = vlcPlayer.getCurrentSubtitleTrack()
+            audioTracks = activePlayer.getAudioTracks()
+            currentAudioTrack = activePlayer.getCurrentAudioTrack()
+            subtitleTracks = activePlayer.getSubtitleTracks()
+            currentSubtitleTrack = activePlayer.getCurrentSubtitleTrack()
         }
     }
     
-    // Initialize VLC
-    DisposableEffect(Unit) {
-        vlcPlayer.onError = { error -> vlcError = error }
-        vlcInitialized = vlcPlayer.initialize()
+    // Initialize / release player (restarts when playerType or mpvPath changes)
+    DisposableEffect(activePlayer) {
+        val player = activePlayer // capture for onDispose
+        player.onError = { error -> playerError = error }
+        playerInitialized = player.initialize()
         onDispose {
-            vlcPlayer.release()
+            player.release()
+            playerInitialized = false
         }
+    }
+    
+    // Stop playback when switching player type
+    LaunchedEffect(playerType) {
+        // Give a brief moment so UI can settle
+        kotlinx.coroutines.delay(50)
     }
     
     // Auth state
@@ -280,8 +314,8 @@ fun ShibaGramApp(
         if (currentPlayingVideo != null) {
             while (true) {
                 kotlinx.coroutines.delay(5000)
-                val pos = vlcPlayer.currentPosition.value
-                val dur = vlcPlayer.duration.value
+                val pos = activePlayer.currentPosition.value
+                val dur = activePlayer.duration.value
                 if (pos > 0 && dur > 0) {
                     watchHistoryRepository.saveProgress(
                         messageId = currentPlayingVideo!!.id,
@@ -321,8 +355,8 @@ fun ShibaGramApp(
     // Play video when selected
     LaunchedEffect(currentPlayingVideo) {
         currentPlayingVideo?.let { video ->
-            if (!vlcInitialized) {
-                println("VLC not initialized, cannot play video")
+            if (!playerInitialized) {
+                println("Player not initialized, cannot play video")
                 return@let
             }
             
@@ -339,7 +373,7 @@ fun ShibaGramApp(
             if (localPath != null && video.videoFile.isDownloaded) {
                 // Play local file directly
                 println("Playing local file: $localPath")
-                vlcPlayer.play(localPath)
+                activePlayer.play(localPath)
             } else {
                 // Start progressive download and play from local file as it downloads
                 scope.launch {
@@ -371,8 +405,8 @@ fun ShibaGramApp(
                     
                     if (downloadingPath != null) {
                         println("Playing from local file (still downloading): $downloadingPath")
-                        // Play the local file directly - VLC can handle partially downloaded files
-                        vlcPlayer.play(downloadingPath)
+                        // Play the local file directly - player can handle partially downloaded files
+                        activePlayer.play(downloadingPath)
                     } else {
                         // Fallback to HTTP streaming (lazy-start server only now)
                         val streamingServer = VideoStreamingServer.getRunningInstance()
@@ -380,7 +414,7 @@ fun ShibaGramApp(
                         val streamUrl = streamingServer.registerVideo(fileId, fileSize, mimeType, dataProvider)
                         currentStreamingToken = "video_${fileId}"
                         println("Streaming video from: $streamUrl")
-                        vlcPlayer.play(streamUrl)
+                        activePlayer.play(streamUrl)
                     }
                 }
             }
@@ -392,7 +426,7 @@ fun ShibaGramApp(
             currentStreamingToken = null
             activeDataProvider?.close()
             activeDataProvider = null
-            if (vlcInitialized) vlcPlayer.stop()
+            if (playerInitialized) activePlayer.stop()
             // Trigger cache cleanup after video stops
             cacheManager.triggerCleanup()
         }
@@ -427,13 +461,13 @@ fun ShibaGramApp(
                         VideoPlayerScreen(
                             currentVideo = currentPlayingVideo,
                             playlist = currentPlaylist,
-                            isPlaying = isVlcPlaying,
-                            currentPosition = vlcPosition,
-                            duration = if (vlcDuration > 0) vlcDuration else currentPlayingVideo?.duration?.times(1000L) ?: 0L,
-                            volume = vlcVolume,
-                            onPlayPauseClick = { vlcPlayer.togglePlayPause() },
-                            onSeek = { position -> vlcPlayer.seekTo(position) },
-                            onVolumeChange = { vol -> vlcPlayer.setVolume(vol) },
+                            isPlaying = isPlayerPlaying,
+                            currentPosition = playerPosition,
+                            duration = if (playerDuration > 0) playerDuration else currentPlayingVideo?.duration?.times(1000L) ?: 0L,
+                            volume = playerVolume,
+                            onPlayPauseClick = { activePlayer.togglePlayPause() },
+                            onSeek = { position -> activePlayer.seekTo(position) },
+                            onVolumeChange = { vol -> activePlayer.setVolume(vol) },
                             onPreviousClick = {
                                 currentPlaylist?.let {
                                     val newPlaylist = it.previous()
@@ -450,7 +484,7 @@ fun ShibaGramApp(
                             },
                             onFullscreenToggle = { onFullscreenChange(!isFullscreen) },
                             onCloseClick = {
-                                vlcPlayer.stop()
+                                activePlayer.stop()
                                 currentPlayingVideo = null
                                 currentPlaylist = null
                                 // Exit fullscreen when closing video
@@ -470,54 +504,119 @@ fun ShibaGramApp(
                             audioTracks = audioTracks.map { com.shirou.shibagram.ui.screens.TrackInfo(it.id, it.name) },
                             currentAudioTrack = currentAudioTrack,
                             onAudioTrackSelect = { trackId ->
-                                vlcPlayer.setAudioTrack(trackId)
+                                activePlayer.setAudioTrack(trackId)
                                 currentAudioTrack = trackId
                             },
                             // Subtitle tracks
                             subtitleTracks = subtitleTracks.map { com.shirou.shibagram.ui.screens.TrackInfo(it.id, it.name) },
                             currentSubtitleTrack = currentSubtitleTrack,
                             onSubtitleTrackSelect = { trackId ->
-                                vlcPlayer.setSubtitleTrack(trackId)
+                                activePlayer.setSubtitleTrack(trackId)
                                 currentSubtitleTrack = trackId
                             },
                             // Playback speed
                             currentPlaybackSpeed = playbackSpeed,
                             onPlaybackSpeedChange = { speed ->
-                                vlcPlayer.setPlaybackSpeed(speed)
+                                activePlayer.setPlaybackSpeed(speed)
                                 playbackSpeed = speed
                             },
+                            renderControlsAsPopup = activePlayer.rendersToWindow,
+                            mpvControlsVisible = showMpvControls,
+                            onMpvControlsInteraction = {
+                                showMpvControls = true
+                                mpvInteractionKey++
+                            },
                             videoContent = {
-                                // VLC video frame rendered directly in Compose
+                                // Video frame rendered directly in Compose
                                 Box(
                                     modifier = Modifier.fillMaxSize().background(Color.Black),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    if (vlcInitialized) {
-                                        vlcFrame?.let { frame ->
-                                            Image(
-                                                bitmap = frame,
-                                                contentDescription = "Video",
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentScale = ContentScale.Fit
+                                    if (playerInitialized) {
+                                        if (activePlayer.rendersToWindow) {
+                                            // MPV: render into native window via a stable AWT Canvas
+                                            val player = activePlayer
+
+                                            // Thread-safe channels: AWT EDT → Compose thread
+                                            val mpvClickChannel = remember { kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED) }
+                                            val mpvMoveChannel = remember { kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED) }
+
+                                            // Process click events on Compose thread
+                                            LaunchedEffect(mpvClickChannel) {
+                                                for (event in mpvClickChannel) {
+                                                    showMpvControls = !showMpvControls
+                                                    mpvInteractionKey++
+                                                }
+                                            }
+                                            // Process mouse-move events on Compose thread (coalesced)
+                                            LaunchedEffect(mpvMoveChannel) {
+                                                for (event in mpvMoveChannel) {
+                                                    if (!showMpvControls) {
+                                                        showMpvControls = true
+                                                    }
+                                                    mpvInteractionKey++
+                                                }
+                                            }
+
+                                            val mpvCanvas = remember(player) {
+                                                object : java.awt.Canvas() {
+                                                    override fun paint(g: java.awt.Graphics?) { /* no-op */ }
+                                                    override fun update(g: java.awt.Graphics?) { /* no-op */ }
+                                                }.also { canvas ->
+                                                    canvas.background = java.awt.Color.BLACK
+                                                    canvas.ignoreRepaint = true
+                                                    // Click to toggle controls, mouse move to show
+                                                    // Events dispatched via channels to Compose thread (NOT AWT EDT)
+                                                    canvas.addMouseListener(object : java.awt.event.MouseAdapter() {
+                                                        override fun mouseClicked(e: java.awt.event.MouseEvent?) {
+                                                            mpvClickChannel.trySend(Unit)
+                                                        }
+                                                    })
+                                                    canvas.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+                                                        override fun mouseMoved(e: java.awt.event.MouseEvent?) {
+                                                            mpvMoveChannel.trySend(Unit)
+                                                        }
+                                                    })
+                                                }
+                                            }
+                                            LaunchedEffect(mpvCanvas, player) {
+                                                player.attachCanvas(mpvCanvas)
+                                            }
+                                            androidx.compose.ui.awt.SwingPanel(
+                                                factory = { mpvCanvas },
+                                                modifier = Modifier.fillMaxSize()
                                             )
-                                        } ?: run {
-                                            // Show loading indicator while video is loading
-                                            val isBuffering by vlcPlayer.isBuffering.collectAsState()
-                                            if (isVlcPlaying || isBuffering) {
-                                                CircularProgressIndicator(
-                                                    color = MaterialTheme.colorScheme.primary
+                                        } else {
+                                            // VLC: render frames as Image
+                                            playerFrame?.let { frame ->
+                                                Image(
+                                                    bitmap = frame,
+                                                    contentDescription = "Video",
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentScale = ContentScale.Fit
                                                 )
+                                            } ?: run {
+                                                // Show loading indicator while video is loading
+                                                val isBuffering by activePlayer.isBuffering.collectAsState()
+                                                if (isPlayerPlaying || isBuffering) {
+                                                    CircularProgressIndicator(
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
                                             }
                                         }
                                     } else {
-                                        // Show error if VLC not available
+                                        // Show error if player not available
                                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                             Text(
-                                                text = vlcError ?: "VLC player not available",
+                                                text = playerError ?: "Player not available",
                                                 color = MaterialTheme.colorScheme.error
                                             )
                                             Text(
-                                                text = "Please install VLC media player",
+                                                text = when (playerType) {
+                                                    PlayerType.VLC -> "Please install VLC media player"
+                                                    PlayerType.MPV -> "Please install mpv (https://mpv.io)"
+                                                },
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
@@ -676,6 +775,22 @@ fun ShibaGramApp(
                                                     println("Error clearing cache: ${e.message}")
                                                 }
                                             }
+                                        },
+                                        playerType = playerType,
+                                        onPlayerTypeChange = { newType ->
+                                            // Stop current video before switching
+                                            if (currentPlayingVideo != null) {
+                                                activePlayer.stop()
+                                                currentPlayingVideo = null
+                                                currentPlaylist = null
+                                            }
+                                            playerType = newType
+                                            userPrefs.playerType = newType
+                                        },
+                                        mpvPath = mpvPath,
+                                        onMpvPathChange = {
+                                            mpvPath = it
+                                            userPrefs.mpvPath = it
                                         }
                                     )
                                 }

@@ -3,6 +3,7 @@ package com.shirou.shibagram.data.preferences
 import com.russhwolf.settings.Settings
 import com.russhwolf.settings.get
 import com.russhwolf.settings.set
+import com.shirou.shibagram.domain.model.PlayerType
 import com.shirou.shibagram.domain.model.ViewingMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +23,8 @@ class UserPreferencesRepository {
         private const val KEY_DOWNLOAD_LOCATION = "download_location"
         private const val KEY_LAST_CHANNEL_ID = "last_channel_id"
         private const val KEY_VOLUME = "volume"
+        private const val KEY_PLAYER_TYPE = "player_type"
+        private const val KEY_MPV_PATH = "mpv_path"
         
         @Volatile
         private var instance: UserPreferencesRepository? = null
@@ -79,4 +82,14 @@ class UserPreferencesRepository {
     var lastChannelId: Long
         get() = settings[KEY_LAST_CHANNEL_ID, 0L]
         set(value) { settings[KEY_LAST_CHANNEL_ID] = value }
+
+    var playerType: PlayerType
+        get() = try {
+            PlayerType.valueOf(settings[KEY_PLAYER_TYPE, PlayerType.VLC.name])
+        } catch (_: Exception) { PlayerType.VLC }
+        set(value) { settings[KEY_PLAYER_TYPE] = value.name }
+
+    var mpvPath: String
+        get() = settings[KEY_MPV_PATH, ""]
+        set(value) { settings[KEY_MPV_PATH] = value }
 }

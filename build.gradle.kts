@@ -1,9 +1,9 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
-    kotlin("jvm") version "1.9.22"
-    id("org.jetbrains.compose") version "1.6.0"
-    kotlin("plugin.serialization") version "1.9.22"
+    kotlin("jvm") version "1.9.25"
+    id("org.jetbrains.compose") version "1.7.0"
+    kotlin("plugin.serialization") version "1.9.25"
 }
 
 group = "com.shirou.shibagram"
@@ -78,6 +78,10 @@ dependencies {
     
     // VLC for video playback
     implementation("uk.co.caprica:vlcj:4.8.2")
+    
+    // JNA (used by vlcj and MPV window embedding)
+    implementation("net.java.dev.jna:jna:5.14.0")
+    implementation("net.java.dev.jna:jna-platform:5.14.0")
     
     // NanoHTTPD for local streaming server
     implementation("org.nanohttpd:nanohttpd:2.3.1")

@@ -148,6 +148,8 @@ fun ShibaGramApp(
     // MPV controls visibility (managed here because Canvas mouse listener lives here)
     var showMpvControls by remember { mutableStateOf(true) }
     var mpvInteractionKey by remember { mutableStateOf(0) }
+    // Debounce: ignore mouse-move-to-show for 600ms after a click-to-hide
+    var lastControlsHideTime by remember { mutableStateOf(0L) }
 
     // Active player engine (VLC or MPV) — recreated when player type changes
     val activePlayer: MediaPlayerEngine = remember(playerType, mpvPath) {
@@ -178,9 +180,16 @@ fun ShibaGramApp(
     var currentSubtitleTrack by remember { mutableStateOf(-1) }
     var playbackSpeed by remember { mutableStateOf(1f) }
 
-    // MPV controls: auto-hide 3s after last interaction while playing
+    // MPV controls: force-show when paused, auto-hide 3s after last interaction while playing
     LaunchedEffect(showMpvControls, isPlayerPlaying, mpvInteractionKey) {
-        if (showMpvControls && isPlayerPlaying && activePlayer.rendersToWindow) {
+        if (!activePlayer.rendersToWindow) return@LaunchedEffect
+        // Rule 1: always show controls when paused
+        if (!isPlayerPlaying) {
+            if (!showMpvControls) showMpvControls = true
+            return@LaunchedEffect
+        }
+        // Rule 2: auto-hide after 3s of no interaction while playing
+        if (showMpvControls) {
             delay(3000)
             showMpvControls = false
         }
@@ -544,17 +553,34 @@ fun ShibaGramApp(
                                             // Process click events on Compose thread
                                             LaunchedEffect(mpvClickChannel) {
                                                 for (event in mpvClickChannel) {
-                                                    showMpvControls = !showMpvControls
+                                                    // Only toggle controls when playing;
+                                                    // when paused, controls are always visible
+                                                    if (activePlayer.isPlaying.value) {
+                                                        val wasVisible = showMpvControls
+                                                        showMpvControls = !wasVisible
+                                                        if (wasVisible) {
+                                                            // Mark time of hide so mouse-move won't re-show immediately
+                                                            lastControlsHideTime = System.currentTimeMillis()
+                                                        }
+                                                    }
                                                     mpvInteractionKey++
                                                 }
                                             }
                                             // Process mouse-move events on Compose thread (coalesced)
                                             LaunchedEffect(mpvMoveChannel) {
                                                 for (event in mpvMoveChannel) {
-                                                    if (!showMpvControls) {
-                                                        showMpvControls = true
+                                                    if (!showMpvControls && activePlayer.isPlaying.value) {
+                                                        // Debounce: only re-show controls if 600ms has passed
+                                                        // since the user explicitly clicked to hide them
+                                                        val elapsed = System.currentTimeMillis() - lastControlsHideTime
+                                                        if (elapsed > 600) {
+                                                            showMpvControls = true
+                                                        }
                                                     }
-                                                    mpvInteractionKey++
+                                                    // Only reset auto-hide timer when controls are visible
+                                                    if (showMpvControls) {
+                                                        mpvInteractionKey++
+                                                    }
                                                 }
                                             }
 

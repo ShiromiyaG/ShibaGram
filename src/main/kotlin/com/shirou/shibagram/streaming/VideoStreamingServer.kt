@@ -42,9 +42,19 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
             return instance ?: synchronized(this) {
                 instance ?: VideoStreamingServer().also { 
                     instance = it
-                    it.startServer()
                 }
             }
+        }
+        
+        /**
+         * Get instance and ensure server is started. Call this only when streaming is needed.
+         */
+        fun getRunningInstance(): VideoStreamingServer {
+            val inst = getInstance()
+            if (inst.listeningPort == 0) {
+                inst.startServer()
+            }
+            return inst
         }
         
         fun shutdown() {

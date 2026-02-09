@@ -9,13 +9,11 @@ import java.io.File
  * Ported from Android ShibaGram's Room database.
  */
 object ShibaGramDatabase {
-    private var database: Database? = null
-    
-    fun initialize() {
+    private val db: Database by lazy {
         val dbPath = File(System.getProperty("user.home"), ".ShibaGram/ShibaGram.db")
         dbPath.parentFile?.mkdirs()
         
-        database = Database.connect(
+        val database = Database.connect(
             url = "jdbc:sqlite:${dbPath.absolutePath}",
             driver = "org.sqlite.JDBC"
         )
@@ -23,10 +21,17 @@ object ShibaGramDatabase {
         transaction(database) {
             SchemaUtils.create(PlaybackProgressTable, SavedVideosTable, ChannelCacheTable)
         }
+        
+        database
+    }
+    
+    fun initialize() {
+        // Triggers lazy initialization if not already done
+        db
     }
     
     fun getDatabase(): Database {
-        return database ?: throw IllegalStateException("Database not initialized")
+        return db
     }
 }
 

@@ -16,14 +16,12 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.dp
 import com.shirou.shibagram.data.dto.MediaCardData
+import com.shirou.shibagram.data.local.ThumbnailCache
 import com.shirou.shibagram.domain.model.Channel
 import com.shirou.shibagram.domain.model.ChatFolder
 import com.shirou.shibagram.domain.model.MediaMessage
 import com.shirou.shibagram.domain.model.ViewingMode
 import com.shirou.shibagram.ui.components.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.jetbrains.skia.Image
 import java.io.File
 
 /**
@@ -268,17 +266,8 @@ private fun VideosGrid(
 }
 
 /**
- * Load an image from file path as ImageBitmap.
+ * Load an image from file path as ImageBitmap (cached).
  */
-private suspend fun loadImageBitmap(path: String): ImageBitmap? = withContext(Dispatchers.IO) {
-    try {
-        val file = File(path)
-        if (file.exists()) {
-            val bytes = file.readBytes()
-            Image.makeFromEncoded(bytes).toComposeImageBitmap()
-        } else null
-    } catch (e: Exception) {
-        println("Error loading image: ${e.message}")
-        null
-    }
+private suspend fun loadImageBitmap(path: String): ImageBitmap? {
+    return ThumbnailCache.getOrLoad(path)
 }

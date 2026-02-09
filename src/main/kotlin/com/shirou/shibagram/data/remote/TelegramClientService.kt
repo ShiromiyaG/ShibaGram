@@ -11,9 +11,6 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.*
 import java.io.File
 import java.nio.file.Paths
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 // Type alias for domain ChatFolder to avoid conflict with TdApi.ChatFolder
 typealias DomainChatFolder = com.shirou.shibagram.domain.model.ChatFolder
@@ -191,18 +188,17 @@ class TelegramClientService : AutoCloseable {
         }
     }
     
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private suspend fun sendAsync(function: TdApi.Function<*>): TdApi.Object? = withContext(Dispatchers.IO) {
         val client = this@TelegramClientService.client ?: return@withContext null
-        val latch = CountDownLatch(1)
-        val result = AtomicReference<TdApi.Object?>(null)
         
-        client.send(function, { obj ->
-            result.set(obj)
-            latch.countDown()
-        }, null)
-        
-        latch.await(30, TimeUnit.SECONDS)
-        result.get()
+        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            client.send(function, { obj ->
+                if (continuation.isActive) {
+                    continuation.resume(obj, null)
+                }
+            }, null)
+        }
     }
     
     suspend fun sendPhoneNumber(phoneNumber: String) = withContext(Dispatchers.IO) {
@@ -297,8 +293,7 @@ class TelegramClientService : AutoCloseable {
             }
             
             // Otherwise, load all chats (main + archive)
-            val allChannels = mutableMapOf<Long, Channel>()
-            val chatPositions = mutableMapOf<Long, Long>()
+            val allChatIds = mutableListOf<Pair<Long, Long>>() // chatId to position
             
             // Load main chat list
             val mainChats = sendAsync(GetChats().apply {
@@ -307,12 +302,8 @@ class TelegramClientService : AutoCloseable {
             })
             
             if (mainChats is Chats) {
-                var position = 0L
-                for (chatId in mainChats.chatIds) {
-                    loadChat(chatId)?.let { channel ->
-                        allChannels[chatId] = channel
-                        chatPositions[chatId] = position++
-                    }
+                mainChats.chatIds.forEachIndexed { index, chatId ->
+                    allChatIds.add(chatId to index.toLong())
                 }
             }
             
@@ -323,23 +314,39 @@ class TelegramClientService : AutoCloseable {
             })
             
             if (archiveChats is Chats) {
-                var position = 10000L
-                for (chatId in archiveChats.chatIds) {
-                    if (!allChannels.containsKey(chatId)) {
-                        loadChat(chatId)?.let { channel ->
-                            allChannels[chatId] = channel.copy(name = "📦 ${channel.name}")
-                            chatPositions[chatId] = position++
-                        }
+                archiveChats.chatIds.forEachIndexed { index, chatId ->
+                    if (allChatIds.none { it.first == chatId }) {
+                        allChatIds.add(chatId to (10000L + index))
                     }
                 }
             }
             
-            val sortedChannels = allChannels.entries
-                .sortedBy { chatPositions[it.key] ?: Long.MAX_VALUE }
-                .map { it.value }
+            // Load chats in parallel batches of 20 for faster startup
+            val allChannels = java.util.concurrent.ConcurrentHashMap<Long, Channel>()
+            val chatPositions = java.util.concurrent.ConcurrentHashMap<Long, Long>()
             
-            _channels.value = sortedChannels
-            println("Loaded ${sortedChannels.size} channels")
+            allChatIds.chunked(20).forEach { batch ->
+                val jobs = batch.map { (chatId, position) ->
+                    scope.async {
+                        loadChat(chatId)?.let { channel ->
+                            val finalChannel = if (position >= 10000L) {
+                                channel.copy(name = "📦 ${channel.name}")
+                            } else channel
+                            allChannels[chatId] = finalChannel
+                            chatPositions[chatId] = position
+                        }
+                    }
+                }
+                jobs.forEach { it.await() }
+                
+                // Emit partial results after each batch so UI updates incrementally
+                val sortedSoFar = allChannels.entries
+                    .sortedBy { chatPositions[it.key] ?: Long.MAX_VALUE }
+                    .map { it.value }
+                _channels.value = sortedSoFar
+            }
+            
+            println("Loaded ${allChannels.size} channels")
             
         } catch (e: Exception) {
             println("Error loading channels: ${e.message}")
@@ -366,11 +373,16 @@ class TelegramClientService : AutoCloseable {
                 // Try to get the photo path, download if not already downloaded
                 var photoPath = chat.photo?.small?.local?.path?.takeIf { it.isNotEmpty() }
                 if (photoPath == null && chat.photo?.small != null) {
-                    // Download the photo
+                    // Start async download (non-blocking) — photo will appear once downloaded
                     val photoFile = chat.photo.small
                     if (!photoFile.local.isDownloadingCompleted && photoFile.id != 0) {
-                        val downloadedFile = downloadFile(photoFile.id, priority = 1)
-                        photoPath = downloadedFile?.absolutePath
+                        try {
+                            sendAsync(DownloadFile().apply {
+                                this.fileId = photoFile.id
+                                this.priority = 1
+                                this.synchronous = false
+                            })
+                        } catch (e: Exception) { /* ignore photo download failures */ }
                     }
                 }
                 
@@ -406,7 +418,7 @@ class TelegramClientService : AutoCloseable {
      * Get chats for a specific folder.
      */
     private suspend fun loadChannelsForFolder(folderId: Int): List<Channel> = withContext(Dispatchers.IO) {
-        val channels = mutableListOf<Channel>()
+        val channels = java.util.Collections.synchronizedList(mutableListOf<Channel>())
         try {
             val response = sendAsync(GetChats().apply {
                 chatList = ChatListFolder(folderId)
@@ -414,10 +426,16 @@ class TelegramClientService : AutoCloseable {
             })
             
             if (response is Chats) {
-                for (chatId in response.chatIds) {
-                    loadChat(chatId)?.let { channel ->
-                        channels.add(channel)
+                // Load in parallel batches of 20
+                response.chatIds.toList().chunked(20).forEach { batch ->
+                    val jobs = batch.map { chatId ->
+                        scope.async {
+                            loadChat(chatId)?.let { channel ->
+                                channels.add(channel)
+                            }
+                        }
                     }
+                    jobs.forEach { it.await() }
                 }
             }
         } catch (e: Exception) {
@@ -501,6 +519,9 @@ class TelegramClientService : AutoCloseable {
                             }
                         }
                         
+                        // Emit intermediate results so UI can show videos as they load
+                        trySend(allVideos.sortedByDescending { it.date })
+                        
                         if (messages.size < limit) {
                             hasMore = false
                         }
@@ -576,6 +597,9 @@ class TelegramClientService : AutoCloseable {
                             }
                         }
                         
+                        // Emit intermediate results for documents too
+                        trySend(allVideos.sortedByDescending { it.date })
+                        
                         if (messages.size < limit) {
                             hasMore = false
                         }
@@ -585,8 +609,8 @@ class TelegramClientService : AutoCloseable {
                 }
             }
             
-            val sortedVideos = allVideos.sortedByDescending { it.date }
-            trySend(sortedVideos)
+            // Final sorted emission
+            trySend(allVideos.sortedByDescending { it.date })
             
         } catch (e: Exception) {
             println("Error getting video messages: ${e.message}")
@@ -813,58 +837,68 @@ class TelegramClientService : AutoCloseable {
                     }
                 }
             } else {
-                // Global search across all chats
-                for (channel in _channels.value.take(20)) {
-                    try {
-                        val response = sendAsync(SearchChatMessages().apply {
-                            this.chatId = channel.id
-                            this.query = query
-                            this.limit = 10
-                            this.fromMessageId = 0L
-                            this.filter = SearchMessagesFilterVideo()
-                        })
-                        
-                        if (response is FoundChatMessages) {
-                            for (msg in response.messages) {
-                                val content = msg.content
-                                if (content is MessageVideo) {
-                                    val video = content.video
-                                    val file = video.video
-                                    val local = file.local
-                                    val thumbnail = video.thumbnail
-                                    var thumbnailPath = thumbnail?.file?.local?.path?.takeIf { it.isNotEmpty() }
-                                    
-                                    results.add(MediaMessage(
-                                        id = msg.id,
-                                        date = msg.date,
-                                        videoFile = VideoFile(
-                                            id = file.id,
-                                            size = file.size,
-                                            downloadedSize = local.downloadedSize,
-                                            localPath = local.path?.takeIf { it.isNotEmpty() },
-                                            isDownloading = local.isDownloadingActive,
-                                            isDownloaded = local.isDownloadingCompleted
-                                        ),
-                                        filename = video.fileName,
-                                        thumbnailFileId = thumbnail?.file?.id,
-                                        thumbnail = thumbnailPath,
-                                        duration = video.duration,
-                                        width = video.width,
-                                        height = video.height,
-                                        caption = content.caption?.text,
-                                        mimeType = video.mimeType ?: "",
-                                        chatId = msg.chatId,
-                                        title = video.fileName ?: "Video"
-                                    ))
+                // Global search across all chats - parallel for speed
+                val channelsToSearch = _channels.value.take(20)
+                val parallelResults = java.util.Collections.synchronizedList(mutableListOf<MediaMessage>())
+                
+                channelsToSearch.chunked(5).forEach { batch ->
+                    val jobs = batch.map { channel ->
+                        scope.async {
+                            try {
+                                val response = sendAsync(SearchChatMessages().apply {
+                                    this.chatId = channel.id
+                                    this.query = query
+                                    this.limit = 10
+                                    this.fromMessageId = 0L
+                                    this.filter = SearchMessagesFilterVideo()
+                                })
+                                
+                                if (response is FoundChatMessages) {
+                                    for (msg in response.messages) {
+                                        val content = msg.content
+                                        if (content is MessageVideo) {
+                                            val video = content.video
+                                            val file = video.video
+                                            val local = file.local
+                                            val thumbnail = video.thumbnail
+                                            var thumbnailPath = thumbnail?.file?.local?.path?.takeIf { it.isNotEmpty() }
+                                            
+                                            parallelResults.add(MediaMessage(
+                                                id = msg.id,
+                                                date = msg.date,
+                                                videoFile = VideoFile(
+                                                    id = file.id,
+                                                    size = file.size,
+                                                    downloadedSize = local.downloadedSize,
+                                                    localPath = local.path?.takeIf { it.isNotEmpty() },
+                                                    isDownloading = local.isDownloadingActive,
+                                                    isDownloaded = local.isDownloadingCompleted
+                                                ),
+                                                filename = video.fileName,
+                                                thumbnailFileId = thumbnail?.file?.id,
+                                                thumbnail = thumbnailPath,
+                                                duration = video.duration,
+                                                width = video.width,
+                                                height = video.height,
+                                                caption = content.caption?.text,
+                                                mimeType = video.mimeType ?: "",
+                                                chatId = msg.chatId,
+                                                title = video.fileName ?: "Video"
+                                            ))
+                                        }
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                // Skip failed channels
                             }
                         }
-                    } catch (e: Exception) {
-                        // Skip failed channels
                     }
+                    jobs.forEach { it.await() }
                     
-                    if (results.size >= limit) break
+                    if (parallelResults.size >= limit) return@forEach
                 }
+                
+                results.addAll(parallelResults.take(limit))
             }
             
             trySend(results.sortedByDescending { it.date })

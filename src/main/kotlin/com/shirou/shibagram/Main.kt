@@ -27,6 +27,7 @@ import com.shirou.shibagram.ui.components.ShibaGramTopBar
 import com.shirou.shibagram.ui.screens.*
 import com.shirou.shibagram.ui.theme.ShibaGramTheme
 import com.shirou.shibagram.vlc.VlcMediaPlayer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.awt.Dimension
 import androidx.compose.ui.graphics.painter.BitmapPainter
@@ -59,10 +60,14 @@ fun main() = application {
         }
     }
     
-    // Load app icon
+    // Load app icon (pre-computed outside composition to avoid blocking first frame)
     val appIcon = remember {
-        Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")?.use { stream ->
-            BitmapPainter(ImageIO.read(stream).toComposeImageBitmap())
+        try {
+            Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")?.use { stream ->
+                BitmapPainter(ImageIO.read(stream).toComposeImageBitmap())
+            }
+        } catch (e: Exception) {
+            null
         }
     }
     
@@ -208,8 +213,7 @@ fun ShibaGramApp(
     val continueWatchingVideos by watchHistoryRepository.continueWatchingVideos.collectAsState()
     val savedVideos by watchHistoryRepository.savedVideos.collectAsState()
     
-    // Streaming server and current streaming URL
-    val streamingServer = remember { VideoStreamingServer.getInstance() }
+    // Streaming server - lazy, only started when actually needed for HTTP streaming fallback
     var currentStreamingToken by remember { mutableStateOf<String?>(null) }
     
     // Filtered videos based on search
@@ -240,13 +244,30 @@ fun ShibaGramApp(
     
     // Initialize Telegram client and load watch history
     LaunchedEffect(Unit) {
+        // Initialize auth first (critical path)
         authRepository.initialize()
-        watchHistoryRepository.loadContinueWatching()
-        watchHistoryRepository.loadSavedVideos()
         
-        // Start cache manager monitoring
-        cacheManager.startMonitoring()
-        currentCacheSize = cacheManager.getFormattedCacheSize()
+        // Load watch history and cache info in parallel (non-blocking)
+        launch {
+            watchHistoryRepository.loadContinueWatching()
+        }
+        launch {
+            watchHistoryRepository.loadSavedVideos()
+        }
+        
+        // Start cache manager monitoring (deferred - not needed at startup)
+        launch {
+            delay(3000)
+            cacheManager.startMonitoring()
+        }
+        
+        // Calculate cache size on IO thread (deferred)
+        launch {
+            delay(2000)
+            currentCacheSize = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                cacheManager.getFormattedCacheSize()
+            }
+        }
     }
     
     // Update cache manager limit when setting changes
@@ -254,17 +275,22 @@ fun ShibaGramApp(
         cacheManager.maxCacheSizeBytes = (maxCacheSizeGb * 1024 * 1024 * 1024).toLong()
     }
     
-    // Save playback progress periodically
-    LaunchedEffect(currentPlayingVideo, vlcPosition, vlcDuration) {
-        if (currentPlayingVideo != null && vlcPosition > 0 && vlcDuration > 0) {
-            // Save progress every 5 seconds
-            kotlinx.coroutines.delay(5000)
-            watchHistoryRepository.saveProgress(
-                messageId = currentPlayingVideo!!.id,
-                chatId = currentPlayingVideo!!.chatId,
-                position = vlcPosition,
-                duration = vlcDuration
-            )
+    // Save playback progress periodically (debounced - only keyed on the video, NOT on position)
+    LaunchedEffect(currentPlayingVideo) {
+        if (currentPlayingVideo != null) {
+            while (true) {
+                kotlinx.coroutines.delay(5000)
+                val pos = vlcPlayer.currentPosition.value
+                val dur = vlcPlayer.duration.value
+                if (pos > 0 && dur > 0) {
+                    watchHistoryRepository.saveProgress(
+                        messageId = currentPlayingVideo!!.id,
+                        chatId = currentPlayingVideo!!.chatId,
+                        position = pos,
+                        duration = dur
+                    )
+                }
+            }
         }
     }
     
@@ -302,7 +328,7 @@ fun ShibaGramApp(
             
             // Cleanup previous stream
             currentStreamingToken?.let { token ->
-                streamingServer.unregisterVideo(token)
+                VideoStreamingServer.getInstance().unregisterVideo(token)
             }
             currentStreamingToken = null
             activeDataProvider?.close()
@@ -348,7 +374,8 @@ fun ShibaGramApp(
                         // Play the local file directly - VLC can handle partially downloaded files
                         vlcPlayer.play(downloadingPath)
                     } else {
-                        // Fallback to HTTP streaming
+                        // Fallback to HTTP streaming (lazy-start server only now)
+                        val streamingServer = VideoStreamingServer.getRunningInstance()
                         val mimeType = video.mimeType ?: "video/mp4"
                         val streamUrl = streamingServer.registerVideo(fileId, fileSize, mimeType, dataProvider)
                         currentStreamingToken = "video_${fileId}"
@@ -360,7 +387,7 @@ fun ShibaGramApp(
         } ?: run {
             // Cleanup when stopping
             currentStreamingToken?.let { token ->
-                streamingServer.unregisterVideo(token)
+                VideoStreamingServer.getInstance().unregisterVideo(token)
             }
             currentStreamingToken = null
             activeDataProvider?.close()

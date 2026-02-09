@@ -2,6 +2,7 @@ package com.shirou.shibagram.ui.screens
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -9,6 +10,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.io.File
 import java.nio.file.Paths
@@ -42,22 +45,21 @@ fun SettingsScreen(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(scrollState)
+            .padding(horizontal = 20.dp)
     ) {
-        // Header
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.surface
-        ) {
-            Text(
-                text = "Settings",
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.padding(16.dp)
-            )
-        }
+        // Header — bolder, more spacious
+        Spacer(modifier = Modifier.height(20.dp))
         
-        HorizontalDivider()
+        Text(
+            text = "Settings",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
         
-        // Appearance section
+        Spacer(modifier = Modifier.height(24.dp))
+        
+        // Appearance section — in a card
         SettingsSection(title = "Appearance") {
             SettingsItem(
                 icon = Icons.Default.DarkMode,
@@ -72,7 +74,7 @@ fun SettingsScreen(
             )
         }
         
-        HorizontalDivider()
+        Spacer(modifier = Modifier.height(16.dp))
         
         // Storage section
         SettingsSection(title = "Storage") {
@@ -146,7 +148,7 @@ fun SettingsScreen(
             )
         }
         
-        HorizontalDivider()
+        Spacer(modifier = Modifier.height(16.dp))
         
         // Playback section
         SettingsSection(title = "Playback") {
@@ -163,7 +165,7 @@ fun SettingsScreen(
             )
         }
         
-        HorizontalDivider()
+        Spacer(modifier = Modifier.height(16.dp))
         
         // Account section
         SettingsSection(title = "Account") {
@@ -175,7 +177,7 @@ fun SettingsScreen(
             )
         }
         
-        HorizontalDivider()
+        Spacer(modifier = Modifier.height(16.dp))
         
         // About section
         SettingsSection(title = "About") {
@@ -257,15 +259,29 @@ private fun SettingsSection(
     content: @Composable ColumnScope.() -> Unit
 ) {
     Column(
-        modifier = Modifier.padding(vertical = 8.dp)
+        modifier = Modifier.fillMaxWidth()
     ) {
         Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
+            text = title.uppercase(),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+            letterSpacing = androidx.compose.ui.unit.TextUnit(1.2f, androidx.compose.ui.unit.TextUnitType.Sp)
         )
-        content()
+        
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.5.dp)
+        ) {
+            Column {
+                content()
+            }
+        }
     }
 }
 
@@ -280,20 +296,30 @@ private fun SettingsItem(
     Surface(
         onClick = onClick ?: {},
         enabled = onClick != null,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Surface(
+                modifier = Modifier.size(36.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -302,6 +328,7 @@ private fun SettingsItem(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 if (subtitle != null) {
+                    Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = subtitle,
                         style = MaterialTheme.typography.bodySmall,
@@ -311,6 +338,15 @@ private fun SettingsItem(
             }
             
             trailing?.invoke()
+            
+            if (onClick != null && trailing == null) {
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
+            }
         }
     }
 }

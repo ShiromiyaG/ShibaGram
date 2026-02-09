@@ -5,12 +5,13 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
 // Material Design 3 Color Scheme for ShibaGram
+// Refined palette with warmer tones and better contrast
 
-// Primary Colors - Telegram Blue inspired
-val md_theme_light_primary = Color(0xFF0088CC)
+// Primary Colors — ShibaGram blue (distinctive, refined)
+val md_theme_light_primary = Color(0xFF0078D4)
 val md_theme_light_onPrimary = Color(0xFFFFFFFF)
-val md_theme_light_primaryContainer = Color(0xFFD3E4FF)
-val md_theme_light_onPrimaryContainer = Color(0xFF001C38)
+val md_theme_light_primaryContainer = Color(0xFFD4E8FF)
+val md_theme_light_onPrimaryContainer = Color(0xFF001D36)
 
 // Secondary Colors
 val md_theme_light_secondary = Color(0xFF535F70)
@@ -30,11 +31,11 @@ val md_theme_light_onError = Color(0xFFFFFFFF)
 val md_theme_light_errorContainer = Color(0xFFFFDAD6)
 val md_theme_light_onErrorContainer = Color(0xFF410002)
 
-// Background and Surface
-val md_theme_light_background = Color(0xFFFDFCFF)
-val md_theme_light_onBackground = Color(0xFF1A1C1E)
-val md_theme_light_surface = Color(0xFFFDFCFF)
-val md_theme_light_onSurface = Color(0xFF1A1C1E)
+// Background and Surface — slightly warm white for less eye strain
+val md_theme_light_background = Color(0xFFF8F9FC)
+val md_theme_light_onBackground = Color(0xFF191C20)
+val md_theme_light_surface = Color(0xFFF8F9FC)
+val md_theme_light_onSurface = Color(0xFF191C20)
 val md_theme_light_surfaceVariant = Color(0xFFDFE2EB)
 val md_theme_light_onSurfaceVariant = Color(0xFF43474E)
 
@@ -72,10 +73,10 @@ val md_theme_dark_onError = Color(0xFF690005)
 val md_theme_dark_errorContainer = Color(0xFF93000A)
 val md_theme_dark_onErrorContainer = Color(0xFFFFDAD6)
 
-val md_theme_dark_background = Color(0xFF1A1C1E)
-val md_theme_dark_onBackground = Color(0xFFE3E2E6)
-val md_theme_dark_surface = Color(0xFF1A1C1E)
-val md_theme_dark_onSurface = Color(0xFFE3E2E6)
+val md_theme_dark_background = Color(0xFF111318)
+val md_theme_dark_onBackground = Color(0xFFE2E2E6)
+val md_theme_dark_surface = Color(0xFF111318)
+val md_theme_dark_onSurface = Color(0xFFE2E2E6)
 val md_theme_dark_surfaceVariant = Color(0xFF43474E)
 val md_theme_dark_onSurfaceVariant = Color(0xFFC3C6CF)
 

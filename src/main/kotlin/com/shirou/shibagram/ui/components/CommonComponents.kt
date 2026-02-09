@@ -1,17 +1,25 @@
 package com.shirou.shibagram.ui.components
 
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.shirou.shibagram.domain.model.ChatFolder
@@ -19,7 +27,7 @@ import com.shirou.shibagram.domain.model.ViewingMode
 import kotlinx.coroutines.launch
 
 /**
- * Navigation rail for desktop layout.
+ * Navigation rail for desktop layout — polished with filled/outlined icon states and visual indicator.
  */
 @Composable
 fun ShibaGramNavigationRail(
@@ -29,20 +37,65 @@ fun ShibaGramNavigationRail(
 ) {
     NavigationRail(
         modifier = modifier,
-        containerColor = MaterialTheme.colorScheme.surface
+        containerColor = MaterialTheme.colorScheme.surface,
+        header = {
+            Spacer(modifier = Modifier.height(8.dp))
+            // App icon / brand mark
+            Surface(
+                modifier = Modifier.size(42.dp),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primaryContainer
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Default.PlayCircle,
+                        contentDescription = "ShibaGram",
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+        }
     ) {
         NavigationRailItem(
             selected = selectedIndex == 0,
             onClick = { onIndexSelected(0) },
-            icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
-            label = { Text("Home") }
+            icon = {
+                Icon(
+                    if (selectedIndex == 0) Icons.Default.Home else Icons.Outlined.Home,
+                    contentDescription = "Home"
+                )
+            },
+            label = { Text("Home") },
+            colors = NavigationRailItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         )
+        
+        Spacer(modifier = Modifier.height(4.dp))
         
         NavigationRailItem(
             selected = selectedIndex == 1,
             onClick = { onIndexSelected(1) },
-            icon = { Icon(Icons.Default.VideoLibrary, contentDescription = "Channels") },
-            label = { Text("Channels") }
+            icon = {
+                Icon(
+                    if (selectedIndex == 1) Icons.Default.VideoLibrary else Icons.Outlined.VideoLibrary,
+                    contentDescription = "Channels"
+                )
+            },
+            label = { Text("Channels") },
+            colors = NavigationRailItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         )
         
         Spacer(modifier = Modifier.weight(1f))
@@ -50,14 +103,28 @@ fun ShibaGramNavigationRail(
         NavigationRailItem(
             selected = selectedIndex == 2,
             onClick = { onIndexSelected(2) },
-            icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-            label = { Text("Settings") }
+            icon = {
+                Icon(
+                    if (selectedIndex == 2) Icons.Default.Settings else Icons.Outlined.Settings,
+                    contentDescription = "Settings"
+                )
+            },
+            label = { Text("Settings") },
+            colors = NavigationRailItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         )
+        
+        Spacer(modifier = Modifier.height(12.dp))
     }
 }
 
 /**
- * Top app bar for desktop.
+ * Top app bar for desktop — refined with better visual weight and interactive badges.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,29 +141,48 @@ fun ShibaGramTopBar(
         title = {
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleLarge
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
             )
         },
         modifier = modifier,
         actions = {
-            // Search
-            IconButton(onClick = onSearchClick) {
+            // Search — filled tonal button style
+            FilledTonalIconButton(
+                onClick = onSearchClick,
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                ),
+                modifier = Modifier.size(36.dp)
+            ) {
                 Icon(
                     imageVector = Icons.Default.Search,
-                    contentDescription = "Search"
+                    contentDescription = "Search",
+                    modifier = Modifier.size(20.dp)
                 )
             }
             
-            // View mode toggle
+            Spacer(modifier = Modifier.width(8.dp))
+            
+            // View mode toggle — filled tonal
             Box {
-                IconButton(onClick = { showViewModeMenu = true }) {
+                FilledTonalIconButton(
+                    onClick = { showViewModeMenu = true },
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.size(36.dp)
+                ) {
                     Icon(
                         imageVector = when (currentViewMode) {
                             ViewingMode.GRID -> Icons.Default.GridView
                             ViewingMode.LIST -> Icons.Default.ViewList
                             ViewingMode.COMPACT -> Icons.Default.ViewCompact
                         },
-                        contentDescription = "View mode"
+                        contentDescription = "View mode",
+                        modifier = Modifier.size(20.dp)
                     )
                 }
                 
@@ -172,7 +258,7 @@ fun ShibaGramTopBar(
 }
 
 /**
- * Search bar component.
+ * Search bar component — rounded with subtle background.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -187,10 +273,21 @@ fun SearchBar(
     TextField(
         value = query,
         onValueChange = onQueryChange,
-        modifier = modifier.fillMaxWidth(),
-        placeholder = { Text(placeholder) },
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(28.dp)),
+        placeholder = {
+            Text(
+                placeholder,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            )
+        },
         leadingIcon = {
-            Icon(Icons.Default.Search, contentDescription = null)
+            Icon(
+                Icons.Default.Search,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         },
         trailingIcon = {
             if (query.isNotEmpty()) {
@@ -309,7 +406,7 @@ private fun getFolderIcon(iconName: String?): androidx.compose.ui.graphics.vecto
 }
 
 /**
- * Empty state component.
+ * Empty state component — centered with soft icon background.
  */
 @Composable
 fun EmptyState(
@@ -322,13 +419,21 @@ fun EmptyState(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(48.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        icon()
+        Surface(
+            modifier = Modifier.size(80.dp),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                icon()
+            }
+        }
         
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(20.dp))
         
         Text(
             text = title,
@@ -345,14 +450,14 @@ fun EmptyState(
         )
         
         if (action != null) {
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(28.dp))
             action()
         }
     }
 }
 
 /**
- * Loading indicator.
+ * Loading indicator — with branded spinner.
  */
 @Composable
 fun LoadingContent(
@@ -365,10 +470,12 @@ fun LoadingContent(
         verticalArrangement = Arrangement.Center
     ) {
         CircularProgressIndicator(
-            color = MaterialTheme.colorScheme.primary
+            color = MaterialTheme.colorScheme.primary,
+            strokeWidth = 3.dp,
+            modifier = Modifier.size(40.dp)
         )
         
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(20.dp))
         
         Text(
             text = message,

@@ -443,7 +443,12 @@ fun ShibaGramApp(
             currentStreamingToken = null
             activeDataProvider?.close()
             activeDataProvider = null
-            if (playerInitialized) activePlayer.stop()
+            if (playerInitialized) {
+                // Run stop on IO thread to avoid blocking the UI
+                launch(kotlinx.coroutines.Dispatchers.IO) {
+                    activePlayer.stop()
+                }
+            }
             // Trigger cache cleanup after video stops
             cacheManager.triggerCleanup()
         }
@@ -501,7 +506,7 @@ fun ShibaGramApp(
                             },
                             onFullscreenToggle = { onFullscreenChange(!isFullscreen) },
                             onCloseClick = {
-                                activePlayer.stop()
+                                // Just clear state; LaunchedEffect will handle stopping the player
                                 currentPlayingVideo = null
                                 currentPlaylist = null
                                 // Exit fullscreen when closing video
@@ -575,17 +580,11 @@ fun ShibaGramApp(
                                                 }
                                             }
                                             // Process mouse-move events on Compose thread (coalesced)
+                                            // Only reset auto-hide timer, don't show controls on mouse move
                                             LaunchedEffect(mpvMoveChannel) {
                                                 for (event in mpvMoveChannel) {
-                                                    if (!showMpvControls && activePlayer.isPlaying.value) {
-                                                        // Debounce: only re-show controls if 600ms has passed
-                                                        // since the user explicitly clicked to hide them
-                                                        val elapsed = System.currentTimeMillis() - lastControlsHideTime
-                                                        if (elapsed > 600) {
-                                                            showMpvControls = true
-                                                        }
-                                                    }
                                                     // Only reset auto-hide timer when controls are visible
+                                                    // Don't show controls on mouse movement (only on click)
                                                     if (showMpvControls) {
                                                         mpvInteractionKey++
                                                     }

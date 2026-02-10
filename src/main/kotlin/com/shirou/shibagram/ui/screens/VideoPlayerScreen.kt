@@ -3,10 +3,9 @@ package com.shirou.shibagram.ui.screens
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,13 +13,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.shirou.shibagram.domain.model.MediaMessage
@@ -34,15 +30,6 @@ data class TrackInfo(
     val name: String
 )
 
-/**
- * Video player screen with Material Design 3 controls.
- *
- * When [renderControlsAsPopup] is true (MPV), controls render in a Column layout
- * (top bar / video / control bar) with AnimatedVisibility for show/hide.
- * Visibility is driven externally via [mpvControlsVisible].
- *
- * When false (VLC), controls overlay the video with a classic click-to-toggle design.
- */
 @Composable
 fun VideoPlayerScreen(
     currentVideo: MediaMessage?,
@@ -72,7 +59,8 @@ fun VideoPlayerScreen(
     mpvControlsVisible: Boolean = true,
     onMpvControlsInteraction: () -> Unit = {},
     modifier: Modifier = Modifier,
-    videoContent: @Composable () -> Unit
+    // videoContent now accepts an optional overlay composable to embed
+    videoContent: @Composable (overlay: @Composable () -> Unit) -> Unit
 ) {
     var showControls by remember { mutableStateOf(true) }
     var showPlaylist by remember { mutableStateOf(false) }
@@ -80,170 +68,43 @@ fun VideoPlayerScreen(
     var showSubtitleTrackMenu by remember { mutableStateOf(false) }
     var showSpeedMenu by remember { mutableStateOf(false) }
 
-    if (renderControlsAsPopup) {
-        // ── MPV mode: Column layout with animated show/hide ──────────
-        Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Top bar – slides in from top
-                AnimatedVisibility(
-                    visible = mpvControlsVisible,
-                    enter = slideInVertically { -it } + fadeIn(),
-                    exit = slideOutVertically { -it } + fadeOut()
-                ) {
-                    Box(
-                        modifier = Modifier.pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    if (event.type == PointerEventType.Move) {
-                                        onMpvControlsInteraction()
-                                    }
-                                }
-                            }
-                        }
-                    ) {
-                        TopBar(
-                            currentVideo = currentVideo,
-                            playlist = playlist,
-                            isFullscreen = isFullscreen,
-                            showPlaylist = showPlaylist,
-                            onShowPlaylistChange = { showPlaylist = it },
-                            onFullscreenToggle = onFullscreenToggle,
-                            onCloseClick = onCloseClick
-                        )
-                    }
-                }
-
-                // Video area (fills remaining space)
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
-                    contentAlignment = Alignment.Center
-                ) {
-                    videoContent()
-                }
-
-                // Control bar – slides in from bottom
-                AnimatedVisibility(
-                    visible = mpvControlsVisible,
-                    enter = slideInVertically { it } + fadeIn(),
-                    exit = slideOutVertically { it } + fadeOut()
-                ) {
-                    Box(
-                        modifier = Modifier.pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    if (event.type == PointerEventType.Move) {
-                                        onMpvControlsInteraction()
-                                    }
-                                }
-                            }
-                        }
-                    ) {
-                        ControlBar(
-                            isPlaying = isPlaying,
-                            currentPosition = currentPosition,
-                            duration = duration,
-                            volume = volume,
-                            playlist = playlist,
-                            currentVideo = currentVideo,
-                            currentPlaybackSpeed = currentPlaybackSpeed,
-                            audioTracks = audioTracks,
-                            currentAudioTrack = currentAudioTrack,
-                            subtitleTracks = subtitleTracks,
-                            currentSubtitleTrack = currentSubtitleTrack,
-                            showSpeedMenu = showSpeedMenu,
-                            showAudioTrackMenu = showAudioTrackMenu,
-                            showSubtitleTrackMenu = showSubtitleTrackMenu,
-                            onShowSpeedMenuChange = { showSpeedMenu = it },
-                            onShowAudioTrackMenuChange = { showAudioTrackMenu = it },
-                            onShowSubtitleTrackMenuChange = { showSubtitleTrackMenu = it },
-                            onPlayPauseClick = onPlayPauseClick,
-                            onPreviousClick = onPreviousClick,
-                            onNextClick = onNextClick,
-                            onSeek = onSeek,
-                            onVolumeChange = onVolumeChange,
-                            onPlaybackSpeedChange = onPlaybackSpeedChange,
-                            onAudioTrackSelect = onAudioTrackSelect,
-                            onSubtitleTrackSelect = onSubtitleTrackSelect
-                        )
-                    }
-                }
-            }
-
-            // Playlist sidebar
-            if (showPlaylist && playlist != null) {
-                PlaylistSidebar(
-                    playlist = playlist,
-                    onVideoSelect = onVideoSelect,
-                    onClose = { showPlaylist = false },
-                    modifier = Modifier.align(Alignment.CenterEnd)
-                )
-            }
-        }
-    } else {
-        // ── VLC mode: classic overlay layout ────────────────────────
-        Box(
-            modifier = modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) { showControls = !showControls }
-        ) {
-            videoContent()
-
-            if (showControls) {
-                TopBar(
-                    currentVideo = currentVideo,
-                    playlist = playlist,
-                    isFullscreen = isFullscreen,
-                    showPlaylist = showPlaylist,
-                    onShowPlaylistChange = { showPlaylist = it },
-                    onFullscreenToggle = onFullscreenToggle,
-                    onCloseClick = onCloseClick,
-                    modifier = Modifier.align(Alignment.TopCenter)
-                )
-
-                CenterPlaybackControls(
-                    isPlaying = isPlaying,
-                    playlist = playlist,
-                    onPlayPauseClick = onPlayPauseClick,
-                    onPreviousClick = onPreviousClick,
-                    onNextClick = onNextClick,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-
-                Surface(
-                    modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter),
-                    color = Color.Black.copy(alpha = 0.6f)
-                ) {
-                    BottomControlsContent(
-                        currentPosition = currentPosition,
-                        duration = duration,
-                        volume = volume,
-                        currentVideo = currentVideo,
-                        currentPlaybackSpeed = currentPlaybackSpeed,
-                        audioTracks = audioTracks,
-                        currentAudioTrack = currentAudioTrack,
-                        subtitleTracks = subtitleTracks,
-                        currentSubtitleTrack = currentSubtitleTrack,
-                        showSpeedMenu = showSpeedMenu,
-                        showAudioTrackMenu = showAudioTrackMenu,
-                        showSubtitleTrackMenu = showSubtitleTrackMenu,
-                        onShowSpeedMenuChange = { showSpeedMenu = it },
-                        onShowAudioTrackMenuChange = { showAudioTrackMenu = it },
-                        onShowSubtitleTrackMenuChange = { showSubtitleTrackMenu = it },
-                        onSeek = onSeek,
-                        onVolumeChange = onVolumeChange,
-                        onPlaybackSpeedChange = onPlaybackSpeedChange,
-                        onAudioTrackSelect = onAudioTrackSelect,
-                        onSubtitleTrackSelect = onSubtitleTrackSelect
-                    )
-                }
-            }
-
+    // Define the controls overlay
+    val controlsOverlay = @Composable {
+        Box(modifier = Modifier.fillMaxSize()) {
+            PlayerControlsOverlay(
+                currentVideo = currentVideo,
+                playlist = playlist,
+                isPlaying = isPlaying,
+                currentPosition = currentPosition,
+                duration = duration,
+                volume = volume,
+                isFullscreen = isFullscreen,
+                showPlaylist = showPlaylist,
+                audioTracks = audioTracks,
+                currentAudioTrack = currentAudioTrack,
+                subtitleTracks = subtitleTracks,
+                currentSubtitleTrack = currentSubtitleTrack,
+                showSpeedMenu = showSpeedMenu,
+                showAudioTrackMenu = showAudioTrackMenu,
+                showSubtitleTrackMenu = showSubtitleTrackMenu,
+                currentPlaybackSpeed = currentPlaybackSpeed,
+                onShowPlaylistChange = { showPlaylist = it },
+                onShowSpeedMenuChange = { showSpeedMenu = it },
+                onShowAudioTrackMenuChange = { showAudioTrackMenu = it },
+                onShowSubtitleTrackMenuChange = { showSubtitleTrackMenu = it },
+                onPlayPauseClick = onPlayPauseClick,
+                onSeek = onSeek,
+                onVolumeChange = onVolumeChange,
+                onPreviousClick = onPreviousClick,
+                onNextClick = onNextClick,
+                onFullscreenToggle = onFullscreenToggle,
+                onCloseClick = onCloseClick,
+                onAudioTrackSelect = onAudioTrackSelect,
+                onSubtitleTrackSelect = onSubtitleTrackSelect,
+                onPlaybackSpeedChange = onPlaybackSpeedChange
+            )
+            
+            // Playlist Sidebar (inside overlay)
             if (showPlaylist && playlist != null) {
                 PlaylistSidebar(
                     playlist = playlist,
@@ -254,11 +115,115 @@ fun VideoPlayerScreen(
             }
         }
     }
+
+    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+        if (renderControlsAsPopup) {
+            // MPV Mode: Pass controls to videoContent to be embedded in Swing (JLayeredPane)
+            // Visibility is handled inside the ComposePanel in Main.kt via showMpvControls state
+            videoContent(controlsOverlay)
+        } else {
+            // VLC Mode: Standard overlay
+            videoContent {} // No embedded overlay
+            
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showControls = !showControls }
+            ) {
+                if (showControls) {
+                    controlsOverlay()
+                }
+            }
+        }
+    }
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// Shared sub-composables
-// ══════════════════════════════════════════════════════════════════════
+@Composable
+fun PlayerControlsOverlay(
+    currentVideo: MediaMessage?,
+    playlist: VideoPlaylist?,
+    isPlaying: Boolean,
+    currentPosition: Long,
+    duration: Long,
+    volume: Float,
+    isFullscreen: Boolean,
+    showPlaylist: Boolean,
+    audioTracks: List<TrackInfo>,
+    currentAudioTrack: Int,
+    subtitleTracks: List<TrackInfo>,
+    currentSubtitleTrack: Int,
+    showSpeedMenu: Boolean,
+    showAudioTrackMenu: Boolean,
+    showSubtitleTrackMenu: Boolean,
+    currentPlaybackSpeed: Float,
+    onShowPlaylistChange: (Boolean) -> Unit,
+    onShowSpeedMenuChange: (Boolean) -> Unit,
+    onShowAudioTrackMenuChange: (Boolean) -> Unit,
+    onShowSubtitleTrackMenuChange: (Boolean) -> Unit,
+    onPlayPauseClick: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    onPreviousClick: () -> Unit,
+    onNextClick: () -> Unit,
+    onFullscreenToggle: () -> Unit,
+    onCloseClick: () -> Unit,
+    onAudioTrackSelect: (Int) -> Unit,
+    onSubtitleTrackSelect: (Int) -> Unit,
+    onPlaybackSpeedChange: (Float) -> Unit
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        TopBar(
+            currentVideo = currentVideo,
+            playlist = playlist,
+            isFullscreen = isFullscreen,
+            showPlaylist = showPlaylist,
+            onShowPlaylistChange = onShowPlaylistChange,
+            onFullscreenToggle = onFullscreenToggle,
+            onCloseClick = onCloseClick,
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
+
+        CenterPlaybackControls(
+            isPlaying = isPlaying,
+            playlist = playlist,
+            onPlayPauseClick = onPlayPauseClick,
+            onPreviousClick = onPreviousClick,
+            onNextClick = onNextClick,
+            modifier = Modifier.align(Alignment.Center)
+        )
+
+        Surface(
+            modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter),
+            color = Color.Black.copy(alpha = 0.6f)
+        ) {
+            BottomControlsContent(
+                currentPosition = currentPosition,
+                duration = duration,
+                volume = volume,
+                currentVideo = currentVideo,
+                currentPlaybackSpeed = currentPlaybackSpeed,
+                audioTracks = audioTracks,
+                currentAudioTrack = currentAudioTrack,
+                subtitleTracks = subtitleTracks,
+                currentSubtitleTrack = currentSubtitleTrack,
+                showSpeedMenu = showSpeedMenu,
+                showAudioTrackMenu = showAudioTrackMenu,
+                showSubtitleTrackMenu = showSubtitleTrackMenu,
+                onShowSpeedMenuChange = onShowSpeedMenuChange,
+                onShowAudioTrackMenuChange = onShowAudioTrackMenuChange,
+                onShowSubtitleTrackMenuChange = onShowSubtitleTrackMenuChange,
+                onSeek = onSeek,
+                onVolumeChange = onVolumeChange,
+                onPlaybackSpeedChange = onPlaybackSpeedChange,
+                onAudioTrackSelect = onAudioTrackSelect,
+                onSubtitleTrackSelect = onSubtitleTrackSelect
+            )
+        }
+    }
+}
 
 @Composable
 private fun TopBar(
@@ -315,111 +280,27 @@ private fun CenterPlaybackControls(
     onNextClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(modifier = modifier) {
-        Row(horizontalArrangement = Arrangement.spacedBy(32.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (playlist?.hasPrevious == true) {
-                IconButton(onClick = onPreviousClick, modifier = Modifier.size(48.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))) {
-                    Icon(Icons.Default.SkipPrevious, "Previous", tint = Color.White, modifier = Modifier.size(32.dp))
-                }
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(32.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (playlist?.hasPrevious == true) {
+            IconButton(onClick = onPreviousClick, modifier = Modifier.size(48.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))) {
+                Icon(Icons.Default.SkipPrevious, "Previous", tint = Color.White, modifier = Modifier.size(32.dp))
             }
-            IconButton(onClick = onPlayPauseClick, modifier = Modifier.size(72.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary)) {
-                Icon(
-                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    if (isPlaying) "Pause" else "Play",
-                    tint = Color.White, modifier = Modifier.size(48.dp)
-                )
-            }
-            if (playlist?.hasNext == true) {
-                IconButton(onClick = onNextClick, modifier = Modifier.size(48.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))) {
-                    Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(32.dp))
-                }
+        }
+        IconButton(onClick = onPlayPauseClick, modifier = Modifier.size(72.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary)) {
+            Icon(
+                if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                if (isPlaying) "Pause" else "Play",
+                tint = Color.White, modifier = Modifier.size(48.dp)
+            )
+        }
+        if (playlist?.hasNext == true) {
+            IconButton(onClick = onNextClick, modifier = Modifier.size(48.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))) {
+                Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(32.dp))
             }
         }
     }
 }
 
-/** Full control bar for MPV mode (playback buttons + progress + volume + menus). */
-@Composable
-private fun ControlBar(
-    isPlaying: Boolean,
-    currentPosition: Long,
-    duration: Long,
-    volume: Float,
-    playlist: VideoPlaylist?,
-    currentVideo: MediaMessage?,
-    currentPlaybackSpeed: Float,
-    audioTracks: List<TrackInfo>,
-    currentAudioTrack: Int,
-    subtitleTracks: List<TrackInfo>,
-    currentSubtitleTrack: Int,
-    showSpeedMenu: Boolean,
-    showAudioTrackMenu: Boolean,
-    showSubtitleTrackMenu: Boolean,
-    onShowSpeedMenuChange: (Boolean) -> Unit,
-    onShowAudioTrackMenuChange: (Boolean) -> Unit,
-    onShowSubtitleTrackMenuChange: (Boolean) -> Unit,
-    onPlayPauseClick: () -> Unit,
-    onPreviousClick: () -> Unit,
-    onNextClick: () -> Unit,
-    onSeek: (Long) -> Unit,
-    onVolumeChange: (Float) -> Unit,
-    onPlaybackSpeedChange: (Float) -> Unit,
-    onAudioTrackSelect: (Int) -> Unit,
-    onSubtitleTrackSelect: (Int) -> Unit
-) {
-    Surface(color = Color(0xFF1A1A1A)) {
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-            // Progress bar
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(formatDuration(currentPosition), style = MaterialTheme.typography.bodySmall, color = Color.White)
-                Slider(
-                    value = if (duration > 0) currentPosition.toFloat() / duration else 0f,
-                    onValueChange = { onSeek((it * duration).toLong()) },
-                    modifier = Modifier.weight(1f),
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                    )
-                )
-                Text(formatDuration(duration), style = MaterialTheme.typography.bodySmall, color = Color.White)
-            }
-
-            // Playback + volume + menus
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (playlist?.hasPrevious == true) {
-                    IconButton(onClick = onPreviousClick, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.Default.SkipPrevious, "Previous", tint = Color.White, modifier = Modifier.size(24.dp))
-                    }
-                }
-                IconButton(onClick = onPlayPauseClick, modifier = Modifier.size(40.dp)) {
-                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pause" else "Play", tint = Color.White, modifier = Modifier.size(28.dp))
-                }
-                if (playlist?.hasNext == true) {
-                    IconButton(onClick = onNextClick, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(24.dp))
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                Icon(
-                    when { volume == 0f -> Icons.Default.VolumeOff; volume < 0.5f -> Icons.Default.VolumeDown; else -> Icons.Default.VolumeUp },
-                    "Volume", tint = Color.White, modifier = Modifier.size(22.dp)
-                )
-                Slider(
-                    value = volume, onValueChange = onVolumeChange, modifier = Modifier.width(100.dp),
-                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.3f))
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                SpeedMenu(currentPlaybackSpeed, showSpeedMenu, onShowSpeedMenuChange, onPlaybackSpeedChange)
-                if (audioTracks.isNotEmpty()) AudioTrackMenu(audioTracks, currentAudioTrack, showAudioTrackMenu, onShowAudioTrackMenuChange, onAudioTrackSelect)
-                SubtitleTrackMenu(subtitleTracks, currentSubtitleTrack, showSubtitleTrackMenu, onShowSubtitleTrackMenuChange, onSubtitleTrackSelect)
-                QualityLabel(currentVideo)
-            }
-        }
-    }
-}
-
-/** Progress + volume + menus (no playback buttons) for VLC overlay mode. */
 @Composable
 private fun BottomControlsContent(
     currentPosition: Long,
@@ -475,8 +356,6 @@ private fun BottomControlsContent(
         }
     }
 }
-
-// ── Small reusable menu composables ──────────────────────────────────
 
 @Composable
 private fun SpeedMenu(currentSpeed: Float, expanded: Boolean, onExpandChange: (Boolean) -> Unit, onSpeedChange: (Float) -> Unit) {

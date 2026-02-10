@@ -1,32 +1,28 @@
 package com.shirou.shibagram.player
 
 import androidx.compose.ui.graphics.ImageBitmap
+import com.sun.jna.Memory
+import com.sun.jna.Native
+import com.sun.jna.Pointer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.serialization.json.*
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.RandomAccessFile
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Media player backend using **mpv** via subprocess + JSON IPC (named pipe on Windows).
+ * Media player backend using **libmpv** directly via JNA.
  *
- * mpv renders directly into an embedded AWT Canvas via `--wid=<HWND>`,
- * providing hardware-accelerated playback with zero frame-copy overhead.
- *
- * IPC protocol: JSON over Windows named pipe (`\\.\pipe\mpv-shibagram-<nonce>`).
+ * mpv renders directly into an embedded AWT Canvas via the `wid` option,
+ * providing hardware-accelerated playback.
  */
 class MpvMediaPlayer(
-    private val customMpvPath: String? = null
+    private val customMpvPath: String? = null // Ignored in this implementation, uses libs/libmpv-2.dll
 ) : MediaPlayerEngine {
 
-    // ---- State flows (same API surface as VlcMediaPlayer) ----------------
+    // ---- State flows -----------------------------------------------------
 
     private val _currentFrame = MutableStateFlow<ImageBitmap?>(null)
-    override val currentFrame: StateFlow<ImageBitmap?> = _currentFrame // always null – mpv renders natively
+    override val currentFrame: StateFlow<ImageBitmap?> = _currentFrame // always null ÔÇô mpv renders natively
 
     private val _isPlaying = MutableStateFlow(false)
     override val isPlaying: StateFlow<Boolean> = _isPlaying
@@ -50,68 +46,106 @@ class MpvMediaPlayer(
 
     // ---- Internal state --------------------------------------------------
 
-    private var mpvPath: String? = null
-    private var mpvProcess: Process? = null
-    private var ipcPipe: RandomAccessFile? = null
-    private var readerThread: Thread? = null
+    @Volatile private var mpvHandle: Pointer? = null
+    private var eventThread: Thread? = null
     private var canvas: java.awt.Canvas? = null
-    private var windowHandle: Long = 0
-    private var pendingMediaPath: String? = null
-    @Volatile private var lastMediaPath: String? = null
-    @Volatile private var handleLocked = false
-    @Volatile private var shutdownHookInstalled = false
-    @Volatile private var pipeName = generatePipeName()
-    private val released = AtomicBoolean(false)
-    @Volatile private var ipcReady = false // true after pipe connected & verified
-
-    /** Single-threaded executor for all IPC writes – keeps pipe writes off the UI thread. */
-    private var ipcExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "mpv-ipc-writer").apply { isDaemon = true }
-    }
-
-    // Track info parsed from mpv's track-list property
+    @Volatile private var windowHandle: Long = 0
+    @Volatile private var pendingMediaPath: String? = null
+    
+    // Track info
     @Volatile private var _audioTracks = listOf<MediaPlayerEngine.TrackInfo>()
     @Volatile private var _subtitleTracks = listOf<MediaPlayerEngine.TrackInfo>()
     @Volatile private var _currentAudioTrackId = -1
     @Volatile private var _currentSubtitleTrackId = -1
 
-    private val json = Json { ignoreUnknownKeys = true }
+    private val released = AtomicBoolean(false)
+    
+    // Executor for mpv calls to avoid blocking UI thread
+    private val mpvExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "mpv-executor").apply { isDaemon = true }
+    }
 
     // ======================================================================
     // Lifecycle
     // ======================================================================
 
     override fun initialize(): Boolean {
-        mpvPath = customMpvPath?.takeIf { it.isNotBlank() && File(it).exists() }
-            ?: findMpvExecutable()
-
-        if (mpvPath == null) {
-            onError?.invoke("mpv not found. Install mpv (https://mpv.io) and ensure mpv.exe is in your PATH.")
+        // We defer actual mpv_create until we have a window handle
+        try {
+            // Ensure JNA uses UTF-8 for native strings (libmpv expects UTF-8)
+            System.setProperty("jna.encoding", "UTF8")
+            
+            LibMpv.INSTANCE
+            println("libmpv loaded successfully")
+            return true
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            onError?.invoke("Failed to load libmpv: ${e.message}")
             return false
         }
-        println("mpv found at: $mpvPath")
-        return true
     }
 
-    override fun isInitialized(): Boolean = mpvPath != null
+    // ...
+
+    override fun play(mediaPath: String) {
+        println("MPV play() called with: $mediaPath")
+        
+        // Check if file exists to debug "No such file" errors
+        val file = java.io.File(mediaPath)
+        if (file.exists()) {
+             println("MPV play(): File exists. Size: ${file.length()}")
+        } else {
+             println("MPV play(): WARNING - File does not exist at path: $mediaPath")
+        }
+
+        mpvExecutor.submit {
+            println("MPV play() task started for: $mediaPath")
+            if (mpvHandle == null && windowHandle != 0L) {
+                createMpvInternal(windowHandle)
+            }
+            
+            val ctx = mpvHandle
+            if (ctx == null) {
+                println("MPV play deferred - no context yet")
+                pendingMediaPath = mediaPath
+                return@submit
+            }
+
+            _isBuffering.value = true
+            
+            // formatting: use File.toURI() to handle spaces and special chars ([], etc)
+            // formatting: use File.toURI() to handle spaces and special chars ([], etc)
+            val validPath: String = try {
+                if (mediaPath.startsWith("http") || mediaPath.startsWith("rtsp") || mediaPath.startsWith("udp")) {
+                    mediaPath
+                } else {
+                    val f = java.io.File(mediaPath)
+                    var uri = f.toURI().toString()
+                    // Fix for Windows: MPV might need file:/// not file:/
+                    if (uri.startsWith("file:/") && !uri.startsWith("file:///")) {
+                         uri = uri.replaceFirst("file:/", "file:///")
+                    }
+                    uri
+                }
+            } catch (e: Exception) {
+                mediaPath.replace('\\', '/')
+            }
+            
+            println("MPV loadfile: $validPath")
+            command(ctx, "loadfile", validPath, "replace")
+        }
+    }
+
+    override fun isInitialized(): Boolean = true
 
     override fun release() {
         if (!released.compareAndSet(false, true)) return
-        try { sendCommandDirect("""{"command":["quit"]}""") } catch (_: Exception) {}
-        Thread.sleep(150)
-        try { ipcExecutor.shutdownNow() } catch (_: Exception) {}
-        try { ipcPipe?.close() } catch (_: Exception) {}
-        try { mpvProcess?.destroyForcibly() } catch (_: Exception) {}
-        ipcPipe = null
-        ipcReady = false
-        mpvProcess = null
-        readerThread = null
-        canvas = null
-        handleLocked = false
-        _isPlaying.value = false
-        _currentPosition.value = 0
-        _duration.value = 0
-        _currentFrame.value = null
+        
+        mpvExecutor.submit {
+            stopInternal()
+            destroyMpv()
+        }
+        mpvExecutor.shutdown()
     }
 
     // ======================================================================
@@ -122,7 +156,6 @@ class MpvMediaPlayer(
         if (this.canvas === canvas) return
         this.canvas = canvas
         canvas.background = java.awt.Color.BLACK
-        // CRITICAL: prevent AWT from painting over mpv's native rendering
         canvas.ignoreRepaint = true
 
         if (canvas.isDisplayable) {
@@ -138,22 +171,58 @@ class MpvMediaPlayer(
         }
     }
 
+    override fun detachWindow() {
+        // Run on executor to avoid blocking UI thread if called from UI
+        mpvExecutor.submit {
+            destroyMpv()
+            windowHandle = 0
+            canvas = null
+        }
+    }
+
     private fun captureWindowHandle() {
         try {
-            val hwnd = com.sun.jna.Native.getComponentID(canvas!!)
+            val hwnd = Native.getComponentID(canvas!!)
             if (hwnd != windowHandle) {
-                if (handleLocked) {
-                    // During playback, ignore handle changes to avoid restart loops
-                    println("MPV canvas HWND changed during playback (ignored): $hwnd")
-                    return
-                }
                 windowHandle = hwnd
-            }
-            println("MPV canvas HWND: $windowHandle")
+                println("MPV canvas HWND: $windowHandle")
 
-            pendingMediaPath?.let { path ->
-                pendingMediaPath = null
-                play(path)
+                mpvExecutor.submit {
+                    if (mpvHandle != null) {
+                        println("Recreating MPV context due to window change")
+                        destroyMpv()
+                    }
+                    createMpvInternal(hwnd)
+                    
+                     val pending = pendingMediaPath
+                     if (pending != null) {
+                         pendingMediaPath = null
+                         val ctx = mpvHandle
+                         if (ctx != null) {
+                              _isBuffering.value = true
+                              
+                              // formatting: use File.toURI() to handle spaces and special chars ([], etc)
+                              val validPath: String = try {
+                                  if (pending.startsWith("http") || pending.startsWith("rtsp") || pending.startsWith("udp")) {
+                                      pending
+                                  } else {
+                                      val f = java.io.File(pending)
+                                      var uri = f.toURI().toString()
+                                      // Fix for Windows: MPV might need file:/// not file:/
+                                      if (uri.startsWith("file:/") && !uri.startsWith("file:///")) {
+                                           uri = uri.replaceFirst("file:/", "file:///")
+                                      }
+                                      uri
+                                  }
+                              } catch (e: Exception) {
+                                  pending.replace('\\', '/')
+                              }
+                              
+                              println("MPV loadfile pending: $validPath")
+                              command(ctx, "loadfile", validPath, "replace")
+                         }
+                     }
+                 }
             }
         } catch (e: Exception) {
             println("Failed to get HWND: ${e.message}")
@@ -161,289 +230,225 @@ class MpvMediaPlayer(
         }
     }
 
-    // ======================================================================
-    // Process management
-    // ======================================================================
-
-    private fun ensureProcessRunning(): Boolean {
-        if (mpvProcess?.isAlive == true && ipcReady) return true
-        if (windowHandle == 0L) return false
-
-        killProcess() // clean up stale state
-
-        // Generate a fresh pipe name for each launch to avoid stale pipe handles
-        pipeName = generatePipeName()
-
-        val args = listOf(
-            mpvPath!!,
-            "--wid=$windowHandle",
-            "--input-ipc-server=$pipeName",
-            "--idle=yes",
-            "--keep-open=yes",
-            "--no-osc",
-            "--no-input-default-bindings",
-            "--no-terminal",
-            "--hr-seek=yes",
-            "--hwdec=auto-safe",
-            "--keepaspect=yes",
-            "--cursor-autohide=no",
-            "--input-cursor=no",
-            "--no-osd-bar",
-            "--volume=100"
-        )
-
-        return try {
-            println("MPV starting with args: ${args.drop(1).joinToString(" ")}")
-            mpvProcess = ProcessBuilder(args)
-                .redirectErrorStream(true)
-                .start()
-
-            if (!shutdownHookInstalled) {
-                shutdownHookInstalled = true
-                Runtime.getRuntime().addShutdownHook(Thread {
-                    try { killProcess() } catch (_: Exception) {}
-                })
-            }
-
-            // Drain stdout/stderr – log it for diagnostics
-            val proc = mpvProcess
-            Thread {
-                proc?.inputStream?.bufferedReader()?.forEachLine { line ->
-                    println("MPV stdout: $line")
-                }
-            }.apply { isDaemon = true; start() }
-
-            // Wait for mpv to be alive
-            Thread.sleep(200)
-            if (mpvProcess?.isAlive != true) {
-                println("MPV process exited immediately – check your mpv installation")
-                onError?.invoke("mpv process exited immediately")
-                return false
-            }
-
-            // Connect IPC synchronously (blocks until ready or timeout)
-            connectIpcSync()
+    private fun destroyMpv() {
+        val ctx = mpvHandle ?: return
+        println("MPV destroyMpv: destroying context...")
+        LibMpv.INSTANCE.mpv_terminate_destroy(ctx)
+        mpvHandle = null
+        try { 
+            println("MPV destroyMpv: waiting for event thread...")
+            eventThread?.join(2000) // Wait max 2 seconds
+            println("MPV destroyMpv: event thread finished or timed out")
         } catch (e: Exception) {
-            println("Failed to start mpv: ${e.message}")
-            onError?.invoke("Failed to start mpv: ${e.message}")
-            false
+            println("MPV destroyMpv: Exception waiting for event thread: $e")
         }
+        eventThread = null
     }
 
-    private fun killProcess() {
-        try { ipcExecutor.shutdownNow() } catch (_: Exception) {}
-        try { ipcPipe?.close() } catch (_: Exception) {}
-        try { mpvProcess?.destroyForcibly() } catch (_: Exception) {}
-        ipcPipe = null
-        ipcReady = false
-        mpvProcess = null
-        readerThread = null
-        // Create a fresh executor for next launch
-        ipcExecutor = Executors.newSingleThreadExecutor { r ->
-            Thread(r, "mpv-ipc-writer").apply { isDaemon = true }
-        }
-    }
+    private fun createMpvInternal(hwnd: Long) {
+        if (mpvHandle != null) return
 
-    // ======================================================================
-    // IPC (JSON over Windows named pipe)
-    // ======================================================================
-
-    /**
-     * Connects to the mpv IPC pipe **synchronously**, verifies it is alive,
-     * subscribes to properties, and launches the reader thread.
-     * Returns true if everything succeeded.
-     */
-    private fun connectIpcSync(): Boolean {
-        var connected = false
-        for (attempt in 0 until 50) { // retry for up to 5 s
-            if (mpvProcess?.isAlive != true) {
-                println("MPV process died while waiting for IPC pipe (attempt $attempt)")
-                return false
-            }
-            try {
-                ipcPipe = RandomAccessFile(pipeName, "rw")
-                connected = true
-                break
-            } catch (_: Exception) {
-                Thread.sleep(100)
-            }
+        println("MPV createMpvInternal: start with HWND=$hwnd")
+        val ctx = LibMpv.INSTANCE.mpv_create()
+        if (ctx == null) {
+            println("MPV createMpvInternal: mpv_create failed")
+            onError?.invoke("Failed to create mpv context")
+            return
         }
-        if (!connected) {
-            println("Failed to connect to mpv IPC pipe after retries")
-            onError?.invoke("Failed to connect to mpv IPC pipe")
-            return false
-        }
-        println("Connected to mpv IPC pipe")
-
-        // Verify pipe is working with a simple echo command
+        
         try {
-            ipcPipe!!.writeBytes("""{"command":["client_name"]}""" + "\n")
-        } catch (e: Exception) {
-            println("MPV IPC verification failed: ${e.message}")
-            onError?.invoke("mpv IPC pipe not responding")
-            try { ipcPipe?.close() } catch (_: Exception) {}
-            ipcPipe = null
-            return false
-        }
-
-        // Small delay to let mpv fully settle
-        Thread.sleep(100)
-
-        // Observe properties (direct writes during init – already on background thread)
-        observePropertyDirect(1, "time-pos")
-        observePropertyDirect(2, "duration")
-        observePropertyDirect(3, "pause")
-        observePropertyDirect(4, "volume")
-        observePropertyDirect(5, "eof-reached")
-        observePropertyDirect(6, "track-list")
-        observePropertyDirect(7, "paused-for-cache")
-
-        ipcReady = true
-
-        // Start reader thread
-        readerThread = Thread {
-            try {
-                while (mpvProcess?.isAlive == true) {
-                    val line = readLineUtf8(ipcPipe ?: break) ?: break
-                    if (line.isNotEmpty()) handleIpcMessage(line)
-                }
-            } catch (_: Exception) { /* pipe closed */ }
-            println("MPV IPC reader thread ended")
-        }.apply { isDaemon = true; start() }
-
-        return true
-    }
-
-    /** Read a UTF-8 line from the pipe (byte-by-byte, blocking). */
-    private fun readLineUtf8(raf: RandomAccessFile): String? {
-        val buf = ByteArrayOutputStream()
-        while (true) {
-            val b = raf.read()
-            if (b == -1) return if (buf.size() > 0) buf.toString(Charsets.UTF_8.name()) else null
-            if (b == '\n'.code) return buf.toString(Charsets.UTF_8.name())
-            if (b != '\r'.code) buf.write(b)
-        }
-    }
-
-    private fun observePropertyDirect(id: Int, name: String) {
-        sendCommandDirect("""{"command":["observe_property",$id,"$name"]}""")
-    }
-
-    /**
-     * Send an IPC command **asynchronously** via the executor.
-     * Safe to call from any thread (including the UI/Compose thread).
-     */
-    private fun sendCommand(jsonCmd: String) {
-        try {
-            ipcExecutor.submit {
-                sendCommandDirect(jsonCmd)
-            }
-        } catch (_: Exception) {
-            // executor shut down – ignore
-        }
-    }
-
-    /** Send synchronously on the calling thread (used during init & shutdown). */
-    private fun sendCommandDirect(jsonCmd: String) {
-        try {
-            val pipe = ipcPipe ?: return
-            if (mpvProcess?.isAlive != true) {
-                println("MPV IPC send skipped – process not alive")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "wid", hwnd.toString())
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "input-default-bindings", "no")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "input-vo-keyboard", "no")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "osc", "no")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "hwdec", "auto-safe")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "keep-open", "yes")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "idle", "yes")
+            
+            // Enable logging
+            println("MPV createMpvInternal: enabling logging")
+            LibMpv.INSTANCE.mpv_request_log_messages(ctx, "warn")
+            
+            println("MPV createMpvInternal: initializing...")
+            val res = LibMpv.INSTANCE.mpv_initialize(ctx)
+            if (res < 0) {
+                println("MPV createMpvInternal: initialize failed: $res")
+                onError?.invoke("Failed to initialize mpv: " + LibMpv.INSTANCE.mpv_error_string(res))
+                LibMpv.INSTANCE.mpv_destroy(ctx)
                 return
             }
-            synchronized(pipe) {
-                pipe.writeBytes(jsonCmd + "\n")
+            println("MPV createMpvInternal: initialized successfully")
+            
+            mpvHandle = ctx
+            
+            // Observe properties
+            observeProperty(ctx, "time-pos", LibMpv.MPV_FORMAT_DOUBLE)
+            observeProperty(ctx, "duration", LibMpv.MPV_FORMAT_DOUBLE)
+            observeProperty(ctx, "pause", LibMpv.MPV_FORMAT_FLAG)
+            observeProperty(ctx, "volume", LibMpv.MPV_FORMAT_DOUBLE)
+            observeProperty(ctx, "eof-reached", LibMpv.MPV_FORMAT_FLAG)
+            observeProperty(ctx, "track-list", LibMpv.MPV_FORMAT_NODE)
+            observeProperty(ctx, "paused-for-cache", LibMpv.MPV_FORMAT_FLAG)
+
+            // Start event loop
+            println("MPV createMpvInternal: starting event loop")
+            eventThread = Thread { eventLoop(ctx) }.apply { 
+                isDaemon = true
+                name = "mpv-event-loop"
+                start() 
             }
+            
         } catch (e: Exception) {
-            println("MPV IPC send error: ${e.message}")
+            e.printStackTrace()
+            if (mpvHandle != null) {
+                 LibMpv.INSTANCE.mpv_destroy(ctx)
+                 mpvHandle = null
+            }
         }
     }
+    
+    private fun observeProperty(ctx: Pointer, name: String, format: Int) {
+        LibMpv.INSTANCE.mpv_observe_property(ctx, 0, name, format)
+    }
 
-    // ======================================================================
-    // IPC message handling
-    // ======================================================================
-
-    private fun handleIpcMessage(line: String) {
-        try {
-            val obj = json.parseToJsonElement(line).jsonObject
-            when (obj["event"]?.jsonPrimitive?.contentOrNull) {
-                "property-change" -> {
-                    val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: return
-                    handlePropertyChange(name, obj["data"])
+    private fun eventLoop(ctx: Pointer) {
+        println("MPV event loop started")
+        while (true) {
+            val eventPtr = LibMpv.INSTANCE.mpv_wait_event(ctx, -1.0)
+            val event = MpvEvent(eventPtr)
+            
+            if (event.event_id == LibMpv.MPV_EVENT_SHUTDOWN) {
+                println("MPV shutdown event received")
+                break
+            } else if (event.event_id == LibMpv.MPV_EVENT_LOG_MESSAGE) {
+                val msg = MpvEventLogMessage(event.data)
+                println("[MPV] [${msg.level}] ${msg.prefix}: ${msg.text}")
+            }
+            
+            if (event.event_id == LibMpv.MPV_EVENT_PROPERTY_CHANGE) {
+                val prop = MpvEventProperty(event.data)
+                handlePropertyChange(prop)
+            } else if (event.event_id == LibMpv.MPV_EVENT_END_FILE) {
+                val endFile = MpvEventEndFile(event.data)
+                if (endFile.reason == 0) { // MPV_END_FILE_REASON_EOF
+                     _isPlaying.value = false
+                     onMediaEnd?.invoke()
+                } else if (endFile.error != 0) {
+                     val errStr = LibMpv.INSTANCE.mpv_error_string(endFile.error)
+                     println("[MPV] End file error: $errStr")
+                     onError?.invoke("Playback error: $errStr")
                 }
-                "end-file" -> {
-                    val reason = obj["reason"]?.jsonPrimitive?.contentOrNull
-                    if (reason == "eof") {
+            } else if (event.event_id == LibMpv.MPV_EVENT_FILE_LOADED) {
+                _isBuffering.value = false
+            } else if (event.event_id == LibMpv.MPV_EVENT_SEEK) {
+                _isBuffering.value = true
+            } else if (event.event_id == LibMpv.MPV_EVENT_PLAYBACK_RESTART) {
+                _isBuffering.value = false
+            }
+        }
+        println("MPV event loop ended")
+    }
+
+    private fun handlePropertyChange(prop: MpvEventProperty) {
+        val name = prop.name ?: return
+        val data = prop.data
+        
+        when (name) {
+            "time-pos" -> {
+                if (prop.format == LibMpv.MPV_FORMAT_DOUBLE && data != null) {
+                    val pos = data.getDouble(0)
+                    _currentPosition.value = (pos * 1000).toLong()
+                }
+            }
+            "duration" -> {
+                if (prop.format == LibMpv.MPV_FORMAT_DOUBLE && data != null) {
+                    val dur = data.getDouble(0)
+                    _duration.value = (dur * 1000).toLong()
+                }
+            }
+            "pause" -> {
+                if (prop.format == LibMpv.MPV_FORMAT_FLAG && data != null) {
+                    val paused = data.getInt(0) != 0
+                    _isPlaying.value = !paused
+                }
+            }
+            "volume" -> {
+                if (prop.format == LibMpv.MPV_FORMAT_DOUBLE && data != null) {
+                    val vol = data.getDouble(0)
+                    _volume.value = (vol / 100.0).toFloat().coerceIn(0f, 1f)
+                }
+            }
+            "eof-reached" -> {
+                 if (prop.format == LibMpv.MPV_FORMAT_FLAG && data != null) {
+                    val reached = data.getInt(0) != 0
+                    if (reached) {
                         _isPlaying.value = false
                         onMediaEnd?.invoke()
                     }
                 }
-                "file-loaded" -> _isBuffering.value = false
-                "seek" -> _isBuffering.value = true
-                "playback-restart" -> _isBuffering.value = false
-                else -> { /* ignore other events */ }
             }
-        } catch (_: Exception) { /* malformed JSON – ignore */ }
-    }
-
-    private fun handlePropertyChange(name: String, data: JsonElement?) {
-        if (data == null || data is JsonNull) return
-        when (name) {
-            "time-pos" -> {
-                data.jsonPrimitive.doubleOrNull?.let { _currentPosition.value = (it * 1000).toLong() }
-            }
-            "duration" -> {
-                data.jsonPrimitive.doubleOrNull?.let { _duration.value = (it * 1000).toLong() }
-            }
-            "pause" -> {
-                data.jsonPrimitive.booleanOrNull?.let { _isPlaying.value = !it }
-            }
-            "volume" -> {
-                data.jsonPrimitive.doubleOrNull?.let { _volume.value = (it / 100.0).toFloat().coerceIn(0f, 1f) }
-            }
-            "eof-reached" -> {
-                if (data.jsonPrimitive.booleanOrNull == true) {
-                    _isPlaying.value = false
-                    onMediaEnd?.invoke()
+            "paused-for-cache" -> {
+                 if (prop.format == LibMpv.MPV_FORMAT_FLAG && data != null) {
+                    val buffering = data.getInt(0) != 0
+                    _isBuffering.value = buffering
                 }
             }
             "track-list" -> {
-                if (data is JsonArray) parseTrackList(data)
-            }
-            "paused-for-cache" -> {
-                data.jsonPrimitive.booleanOrNull?.let { _isBuffering.value = it }
+                if (prop.format == LibMpv.MPV_FORMAT_NODE && data != null) {
+                    val node = MpvNode(data)
+                    val list = node.getList()
+                    if (list != null) {
+                        parseTrackList(list)
+                    }
+                }
             }
         }
     }
-
-    private fun parseTrackList(tracks: JsonArray) {
+    
+    private fun parseTrackList(list: MpvNodeList) {
         val audio = mutableListOf<MediaPlayerEngine.TrackInfo>()
         val subs = mutableListOf<MediaPlayerEngine.TrackInfo>()
 
-        for (trackEl in tracks) {
-            val t = trackEl.jsonObject
-            val type = t["type"]?.jsonPrimitive?.contentOrNull ?: continue
-            val id = t["id"]?.jsonPrimitive?.intOrNull ?: continue
-            val title = t["title"]?.jsonPrimitive?.contentOrNull
-            val lang = t["lang"]?.jsonPrimitive?.contentOrNull
-            val codec = t["codec"]?.jsonPrimitive?.contentOrNull ?: ""
-            val selected = t["selected"]?.jsonPrimitive?.booleanOrNull ?: false
-
+        for (i in 0 until list.num) {
+            val node = list.getNodeAt(i) ?: continue
+            if (node.format != LibMpv.MPV_FORMAT_NODE_MAP) continue
+            val trackMap = node.getList() ?: continue
+            
+            var type: String? = null
+            var id: Int? = null
+            var title: String? = null
+            var lang: String? = null
+            var codec: String? = null
+            var selected = false
+            
+            for (j in 0 until trackMap.num) {
+                val key = trackMap.getKeyAt(j) ?: continue
+                val valNode = trackMap.getNodeAt(j) ?: continue
+                
+                when (key) {
+                    "type" -> type = valNode.getString()
+                    "id" -> id = valNode.getLong().toInt()
+                    "title" -> title = valNode.getString()
+                    "lang" -> lang = valNode.getString()
+                    "codec" -> codec = valNode.getString()
+                    "selected" -> selected = valNode.getBoolean()
+                }
+            }
+            
+            if (type == null || id == null) continue
+            
             val displayName = buildString {
                 append(title ?: "Track $id")
                 if (lang != null) append(" [$lang]")
-                if (codec.isNotEmpty()) append(" ($codec)")
+                if (codec != null && codec.isNotEmpty()) append(" ($codec)")
             }
 
-            when (type) {
-                "audio" -> {
-                    audio += MediaPlayerEngine.TrackInfo(id, displayName)
-                    if (selected) _currentAudioTrackId = id
-                }
-                "sub" -> {
-                    subs += MediaPlayerEngine.TrackInfo(id, displayName)
-                    if (selected) _currentSubtitleTrackId = id
-                }
+            if (type == "audio") {
+                audio.add(MediaPlayerEngine.TrackInfo(id, displayName))
+                if (selected) _currentAudioTrackId = id
+            } else if (type == "sub") {
+                subs.add(MediaPlayerEngine.TrackInfo(id, displayName))
+                if (selected) _currentSubtitleTrackId = id
             }
         }
         _audioTracks = audio
@@ -454,61 +459,51 @@ class MpvMediaPlayer(
     // Playback controls
     // ======================================================================
 
-    override fun play(mediaPath: String) {
-        lastMediaPath = mediaPath
-        if (windowHandle == 0L) {
-            println("MPV play deferred – no HWND yet")
-            pendingMediaPath = mediaPath
-            return
-        }
 
-        handleLocked = true
 
-        // ensureProcessRunning() is now synchronous: starts process + connects IPC
-        Thread {
-            if (!ensureProcessRunning()) {
-                println("MPV play failed – could not start process")
-                pendingMediaPath = mediaPath
-                return@Thread
-            }
-            _isBuffering.value = true
-            // mpv prefers forward slashes; replace each \ with /
-            val escaped = mediaPath.replace('\\', '/')
-            pendingMediaPath = null
-            sendCommand("""{"command":["loadfile","$escaped","replace"]}""")
-            println("MPV loadfile sent: $escaped")
-        }.apply { isDaemon = true; start() }
+    override fun pause() {
+        setPropertyBoolean("pause", true)
     }
 
-    override fun pause() = sendCommand("""{"command":["set_property","pause",true]}""")
+    override fun resume() {
+        setPropertyBoolean("pause", false)
+    }
 
-    override fun resume() = sendCommand("""{"command":["set_property","pause",false]}""")
-
-    override fun togglePlayPause() = sendCommand("""{"command":["cycle","pause"]}""")
+    override fun togglePlayPause() {
+        val ctx = mpvHandle ?: return
+        mpvExecutor.submit {
+            command(ctx, "cycle", "pause")
+        }
+    }
 
     override fun stop() {
-        sendCommand("""{"command":["stop"]}""")
+        mpvExecutor.submit {
+            stopInternal()
+        }
+    }
+    
+    private fun stopInternal() {
+        val ctx = mpvHandle ?: return
+        command(ctx, "stop")
         _isPlaying.value = false
         _currentPosition.value = 0
         _duration.value = 0
-        // Kill process so next play() will restart with (possibly new) HWND
-        killProcess()
-        handleLocked = false
     }
 
     override fun seekTo(position: Long) {
         val seconds = position / 1000.0
-        sendCommand("""{"command":["set_property","time-pos",$seconds]}""")
+        setPropertyDouble("time-pos", seconds)
     }
 
     override fun setVolume(vol: Float) {
-        val mpvVol = (vol * 100).coerceIn(0f, 100f)
-        sendCommand("""{"command":["set_property","volume",$mpvVol]}""")
+        val mpvVol = (vol * 100).toDouble().coerceIn(0.0, 100.0)
+        setPropertyDouble("volume", mpvVol)
         _volume.value = vol
     }
 
-    override fun setPlaybackSpeed(speed: Float) =
-        sendCommand("""{"command":["set_property","speed",$speed]}""")
+    override fun setPlaybackSpeed(speed: Float) {
+        setPropertyDouble("speed", speed.toDouble())
+    }
 
     // ======================================================================
     // Track management
@@ -517,63 +512,53 @@ class MpvMediaPlayer(
     override fun getAudioTracks(): List<MediaPlayerEngine.TrackInfo> = _audioTracks
     override fun getCurrentAudioTrack(): Int = _currentAudioTrackId
     override fun setAudioTrack(trackId: Int) {
-        if (trackId <= 0) sendCommand("""{"command":["set_property","aid","no"]}""")
-        else sendCommand("""{"command":["set_property","aid",$trackId]}""")
+        if (trackId <= 0) setPropertyString("aid", "no")
+        else setPropertyString("aid", trackId.toString())
         _currentAudioTrackId = trackId
     }
 
     override fun getSubtitleTracks(): List<MediaPlayerEngine.TrackInfo> = _subtitleTracks
     override fun getCurrentSubtitleTrack(): Int = _currentSubtitleTrackId
     override fun setSubtitleTrack(trackId: Int) {
-        if (trackId <= 0) sendCommand("""{"command":["set_property","sid","no"]}""")
-        else sendCommand("""{"command":["set_property","sid",$trackId]}""")
+        if (trackId <= 0) setPropertyString("sid", "no")
+        else setPropertyString("sid", trackId.toString())
         _currentSubtitleTrackId = trackId
     }
 
     // ======================================================================
-    // mpv discovery
+    // Helpers
     // ======================================================================
-
-    private fun findMpvExecutable(): String? {
-        val home = System.getProperty("user.home")
-        val appDir = System.getProperty("user.dir")
-
-        // 1. Check well-known filesystem locations (fast – no process spawn)
-        val candidates = listOf(
-            "$appDir\\mpv.exe",
-            "$appDir\\libs\\mpv\\mpv.exe",
-            "$home\\scoop\\apps\\mpv\\current\\mpv.exe",
-            "$home\\scoop\\shims\\mpv.exe",
-            "C:\\ProgramData\\chocolatey\\bin\\mpv.exe",
-            "C:\\Program Files\\mpv\\mpv.exe",
-            "C:\\Program Files (x86)\\mpv\\mpv.exe",
-            "$home\\AppData\\Local\\Programs\\mpv\\mpv.exe"
-        )
-        for (c in candidates) {
-            if (File(c).exists()) return c
+    
+    private fun command(ctx: Pointer, vararg args: String) {
+        val cmdArgs = arrayOfNulls<String>(args.size + 1)
+        for (i in args.indices) cmdArgs[i] = args[i]
+        cmdArgs[args.size] = null
+        
+        LibMpv.INSTANCE.mpv_command_async(ctx, 0, cmdArgs)
+    }
+    
+    private fun setPropertyBoolean(name: String, value: Boolean) {
+        mpvExecutor.submit {
+             val ctx = mpvHandle ?: return@submit
+             val flag = Memory(4)
+             flag.setInt(0, if (value) 1 else 0)
+             LibMpv.INSTANCE.mpv_set_property_async(ctx, 0, name, LibMpv.MPV_FORMAT_FLAG, flag)
         }
-
-        // 2. Fallback: check PATH via `where` command
-        return try {
-            val p = ProcessBuilder("where", "mpv")
-                .redirectErrorStream(true)
-                .start()
-            val out = p.inputStream.bufferedReader().readText().trim()
-            p.waitFor()
-            if (p.exitValue() == 0 && out.isNotEmpty()) {
-                // Prefer .exe over .com (the .com console wrapper can behave
-                // differently when launched as a subprocess)
-                val lines = out.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                lines.firstOrNull { it.endsWith(".exe", ignoreCase = true) }
-                    ?: lines.firstOrNull()
-            } else null
-        } catch (_: Exception) {
-            null
+    }
+    
+    private fun setPropertyDouble(name: String, value: Double) {
+        mpvExecutor.submit {
+             val ctx = mpvHandle ?: return@submit
+             val d = Memory(8)
+             d.setDouble(0, value)
+             LibMpv.INSTANCE.mpv_set_property_async(ctx, 0, name, LibMpv.MPV_FORMAT_DOUBLE, d)
         }
     }
 
-    companion object {
-        private fun generatePipeName() =
-            "\\\\.\\pipe\\mpv-shibagram-${System.nanoTime()}"
+    private fun setPropertyString(name: String, value: String) {
+        mpvExecutor.submit {
+            val ctx = mpvHandle ?: return@submit
+            LibMpv.INSTANCE.mpv_set_property_string(ctx, name, value)
+        }
     }
 }

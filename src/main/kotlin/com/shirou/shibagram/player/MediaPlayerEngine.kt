@@ -67,6 +67,9 @@ interface MediaPlayerEngine {
     /** Provide an AWT Canvas for native-window rendering. Only called when [rendersToWindow] is true. */
     fun attachCanvas(canvas: java.awt.Canvas) {}
 
+    /** Detach from current native window. MPV stops rendering. */
+    fun detachWindow() {}
+
     // ---- Common data class -----------------------------------------------
 
     data class TrackInfo(val id: Int, val name: String)

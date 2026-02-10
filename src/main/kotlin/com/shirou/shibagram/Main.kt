@@ -447,6 +447,7 @@ fun ShibaGramApp(
                 // Run stop on IO thread to avoid blocking the UI
                 launch(kotlinx.coroutines.Dispatchers.IO) {
                     activePlayer.stop()
+                    activePlayer.detachWindow()
                 }
             }
             // Trigger cache cleanup after video stops
@@ -733,16 +734,6 @@ fun ShibaGramApp(
                                                                 ) {
                                                                     // Click on empty space ÔåÆ toggle controls
                                                                     mpvClickChannel.trySend(Unit)
-                                                                }
-                                                                .pointerInput(Unit) {
-                                                                    awaitPointerEventScope {
-                                                                        while (true) {
-                                                                            val event = awaitPointerEvent()
-                                                                            if (event.type == PointerEventType.Move) {
-                                                                                mpvMoveChannel.trySend(Unit)
-                                                                            }
-                                                                        }
-                                                                    }
                                                                 }
                                                         ) {
                                                             androidx.compose.animation.AnimatedVisibility(

@@ -2,6 +2,8 @@ package com.shirou.shibagram
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -12,6 +14,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.*
 import com.shirou.shibagram.data.remote.TelegramClientService
@@ -32,6 +37,9 @@ import com.shirou.shibagram.vlc.VlcMediaPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.awt.Dimension
+import javax.swing.JLayeredPane
+import java.awt.BorderLayout
+import androidx.compose.ui.awt.ComposePanel // Corrected import
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import javax.imageio.ImageIO
@@ -151,7 +159,7 @@ fun ShibaGramApp(
     // Debounce: ignore mouse-move-to-show for 600ms after a click-to-hide
     var lastControlsHideTime by remember { mutableStateOf(0L) }
 
-    // Active player engine (VLC or MPV) — recreated when player type changes
+    // Active player engine (VLC or MPV) ÔÇö recreated when player type changes
     val activePlayer: MediaPlayerEngine = remember(playerType, mpvPath) {
         when (playerType) {
             PlayerType.VLC -> VlcMediaPlayer()
@@ -535,7 +543,7 @@ fun ShibaGramApp(
                                 showMpvControls = true
                                 mpvInteractionKey++
                             },
-                            videoContent = {
+                            videoContent = { overlay ->
                                 // Video frame rendered directly in Compose
                                 Box(
                                     modifier = Modifier.fillMaxSize().background(Color.Black),
@@ -546,7 +554,7 @@ fun ShibaGramApp(
                                             // MPV: render into native window via a stable AWT Canvas
                                             val player = activePlayer
 
-                                            // Thread-safe channels: AWT EDT → Compose thread
+                                            // Thread-safe channels: AWT EDT ÔåÆ Compose thread
                                             val mpvClickChannel = remember { kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED) }
                                             val mpvMoveChannel = remember { kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED) }
 
@@ -591,8 +599,7 @@ fun ShibaGramApp(
                                                 }.also { canvas ->
                                                     canvas.background = java.awt.Color.BLACK
                                                     canvas.ignoreRepaint = true
-                                                    // Click to toggle controls, mouse move to show
-                                                    // Events dispatched via channels to Compose thread (NOT AWT EDT)
+                                                    
                                                     canvas.addMouseListener(object : java.awt.event.MouseAdapter() {
                                                         override fun mouseClicked(e: java.awt.event.MouseEvent?) {
                                                             mpvClickChannel.trySend(Unit)
@@ -605,13 +612,151 @@ fun ShibaGramApp(
                                                     })
                                                 }
                                             }
+                                            
                                             LaunchedEffect(mpvCanvas, player) {
                                                 player.attachCanvas(mpvCanvas)
                                             }
+
+                                            // Track canvas screen position/size for the overlay dialog
+                                            var canvasScreenBounds by remember { mutableStateOf<java.awt.Rectangle?>(null) }
+                                            
+                                            // Use SwingPanel with just the Canvas for mpv rendering
                                             androidx.compose.ui.awt.SwingPanel(
                                                 factory = { mpvCanvas },
-                                                modifier = Modifier.fillMaxSize()
+                                                modifier = Modifier.fillMaxSize(),
+                                                update = { }
                                             )
+                                            
+                                            // Track canvas bounds reactively
+                                            DisposableEffect(player) {
+                                                var parentRef: java.awt.Window? = null
+                                                
+                                                fun updateBounds() {
+                                                    if (mpvCanvas.isShowing) {
+                                                        try {
+                                                            val loc = mpvCanvas.locationOnScreen
+                                                            canvasScreenBounds = java.awt.Rectangle(
+                                                                loc.x, loc.y, mpvCanvas.width, mpvCanvas.height
+                                                            )
+                                                        } catch (_: Exception) { }
+                                                    }
+                                                }
+                                                
+                                                val canvasListener = object : java.awt.event.ComponentAdapter() {
+                                                    override fun componentResized(e: java.awt.event.ComponentEvent?) = updateBounds()
+                                                    override fun componentMoved(e: java.awt.event.ComponentEvent?) = updateBounds()
+                                                }
+                                                mpvCanvas.addComponentListener(canvasListener)
+                                                
+                                                val parentListener = object : java.awt.event.ComponentAdapter() {
+                                                    override fun componentResized(e: java.awt.event.ComponentEvent?) = updateBounds()
+                                                    override fun componentMoved(e: java.awt.event.ComponentEvent?) = updateBounds()
+                                                }
+                                                
+                                                val hierarchyListener = java.awt.event.HierarchyListener { e ->
+                                                    if ((e.changeFlags and java.awt.event.HierarchyEvent.SHOWING_CHANGED.toLong()) != 0L) {
+                                                        if (mpvCanvas.isShowing) {
+                                                            updateBounds()
+                                                            val pw = javax.swing.SwingUtilities.getWindowAncestor(mpvCanvas)
+                                                            if (pw != parentRef) {
+                                                                parentRef?.removeComponentListener(parentListener)
+                                                                pw?.addComponentListener(parentListener)
+                                                                parentRef = pw
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                mpvCanvas.addHierarchyListener(hierarchyListener)
+                                                
+                                                // Check if already showing
+                                                if (mpvCanvas.isShowing) {
+                                                    updateBounds()
+                                                    val pw = javax.swing.SwingUtilities.getWindowAncestor(mpvCanvas)
+                                                    pw?.addComponentListener(parentListener)
+                                                    parentRef = pw
+                                                }
+                                                
+                                                onDispose {
+                                                    mpvCanvas.removeComponentListener(canvasListener)
+                                                    mpvCanvas.removeHierarchyListener(hierarchyListener)
+                                                    parentRef?.removeComponentListener(parentListener)
+                                                }
+                                            }
+                                            
+                                            // Transparent overlay dialog using Compose Desktop's Dialog
+                                            // which natively supports per-pixel transparency.
+                                            // mpv renders directly to the Canvas HWND via DirectX,
+                                            // so a separate OS window is the only way to overlay on top.
+                                            canvasScreenBounds?.let { bounds ->
+                                                // Only create dialog when bounds are valid (non-zero)
+                                                if (bounds.width <= 0 || bounds.height <= 0) return@let
+                                                val density = androidx.compose.ui.platform.LocalDensity.current
+                                                val dialogState = rememberDialogState(
+                                                    position = WindowPosition(
+                                                        x = with(density) { bounds.x.toDp() },
+                                                        y = with(density) { bounds.y.toDp() }
+                                                    ),
+                                                    size = androidx.compose.ui.unit.DpSize(
+                                                        width = with(density) { bounds.width.toDp() },
+                                                        height = with(density) { bounds.height.toDp() }
+                                                    )
+                                                )
+                                                
+                                                // Keep dialog positioned over the canvas
+                                                LaunchedEffect(bounds) {
+                                                    dialogState.position = WindowPosition(
+                                                        x = with(density) { bounds.x.toDp() },
+                                                        y = with(density) { bounds.y.toDp() }
+                                                    )
+                                                    dialogState.size = androidx.compose.ui.unit.DpSize(
+                                                        width = with(density) { bounds.width.toDp() },
+                                                        height = with(density) { bounds.height.toDp() }
+                                                    )
+                                                }
+                                                
+                                                Dialog(
+                                                    onCloseRequest = {},
+                                                    state = dialogState,
+                                                    undecorated = true,
+                                                    transparent = true,
+                                                    resizable = false,
+                                                    focusable = true,
+                                                    title = ""
+                                                ) {
+                                                    ShibaGramTheme(darkTheme = actualDarkTheme) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .fillMaxSize()
+                                                                .background(Color.Transparent)
+                                                                .clickable(
+                                                                    interactionSource = remember { MutableInteractionSource() },
+                                                                    indication = null
+                                                                ) {
+                                                                    // Click on empty space ÔåÆ toggle controls
+                                                                    mpvClickChannel.trySend(Unit)
+                                                                }
+                                                                .pointerInput(Unit) {
+                                                                    awaitPointerEventScope {
+                                                                        while (true) {
+                                                                            val event = awaitPointerEvent()
+                                                                            if (event.type == PointerEventType.Move) {
+                                                                                mpvMoveChannel.trySend(Unit)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                        ) {
+                                                            androidx.compose.animation.AnimatedVisibility(
+                                                                visible = showMpvControls,
+                                                                enter = androidx.compose.animation.fadeIn(),
+                                                                exit = androidx.compose.animation.fadeOut()
+                                                            ) {
+                                                                overlay()
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         } else {
                                             // VLC: render frames as Image
                                             playerFrame?.let { frame ->
@@ -630,6 +775,9 @@ fun ShibaGramApp(
                                                     )
                                                 }
                                             }
+                                            
+                                            // Invoke the overlay lambda for VLC (it's empty usually, but just in case)
+                                            overlay()
                                         }
                                     } else {
                                         // Show error if player not available

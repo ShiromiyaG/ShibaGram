@@ -416,23 +416,16 @@ fun ShibaGramApp(
                     }
                     println("Buffer ready")
                     
-                    // Get the local file path that TDLib is downloading to
-                    val fileInfo = telegramClient.getFileInfo(fileId)
-                    val downloadingPath = fileInfo?.local?.path?.takeIf { it.isNotEmpty() }
-                    
-                    if (downloadingPath != null) {
-                        println("Playing from local file (still downloading): $downloadingPath")
-                        // Play the local file directly - player can handle partially downloaded files
-                        activePlayer.play(downloadingPath)
-                    } else {
-                        // Fallback to HTTP streaming (lazy-start server only now)
-                        val streamingServer = VideoStreamingServer.getRunningInstance()
-                        val mimeType = video.mimeType ?: "video/mp4"
-                        val streamUrl = streamingServer.registerVideo(fileId, fileSize, mimeType, dataProvider)
-                        currentStreamingToken = "video_${fileId}"
-                        println("Streaming video from: $streamUrl")
-                        activePlayer.play(streamUrl)
-                    }
+                    // Always use HTTP streaming for incomplete files.
+                    // TDLib stores incomplete files in a temp directory without extensions (e.g. just a number).
+                    // MPV/VLC fail to detect the format of these extensionless files.
+                    // Streaming allows us to serve the file with the correct Content-Type header.
+                    val streamingServer = VideoStreamingServer.getRunningInstance()
+                    val mimeType = video.mimeType ?: "video/mp4"
+                    val streamUrl = streamingServer.registerVideo(fileId, fileSize, mimeType, dataProvider)
+                    currentStreamingToken = "video_${fileId}"
+                    println("Streaming video from: $streamUrl")
+                    activePlayer.play(streamUrl)
                 }
             }
         } ?: run {

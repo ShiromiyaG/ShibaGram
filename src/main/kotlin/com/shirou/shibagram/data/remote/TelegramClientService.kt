@@ -642,6 +642,28 @@ class TelegramClientService : AutoCloseable {
             null
         }
     }
+
+    /**
+     * Synchronously download a specific part of a file.
+     * Used for streaming to fetch metadata or specific chunks.
+     */
+    suspend fun downloadFilePart(fileId: Int, offset: Long, limit: Int): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val response = sendAsync(DownloadFile().apply {
+                this.fileId = fileId
+                this.priority = 32
+                this.offset = offset
+                this.limit = limit.toLong()
+                this.synchronous = true
+            })
+            
+            // If success, TDLib returns the File object (updated)
+            response is TdApi.File
+        } catch (e: Exception) {
+            println("Error downloading file part: ${e.message}")
+            false
+        }
+    }
     
     suspend fun downloadFileProgressively(
         fileId: Int,
@@ -649,7 +671,7 @@ class TelegramClientService : AutoCloseable {
     ) = withContext(Dispatchers.IO) {
         try {
             var lastDownloadedSize = 0L
-            var filePath = ""
+            var filePath: String
             
             // Start the download
             sendAsync(DownloadFile().apply {

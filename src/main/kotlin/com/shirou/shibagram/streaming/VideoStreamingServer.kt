@@ -89,19 +89,49 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         streamingFiles.remove(token)?.dataProvider?.close()
     }
     
+    private fun createSilentResponse(status: Response.IStatus, mimeType: String, message: String): Response {
+        val bytes = message.toByteArray()
+        return SilentResponse(status, mimeType, bytes.inputStream(), bytes.size.toLong())
+    }
+
+    private fun createSilentResponse(status: Response.IStatus, mimeType: String, data: InputStream?, totalBytes: Long): Response {
+        return SilentResponse(status, mimeType, data, totalBytes)
+    }
+
+    private class SilentResponse(
+        status: Response.IStatus,
+        mimeType: String?,
+        data: InputStream?,
+        totalBytes: Long
+    ) : Response(status, mimeType, data, totalBytes) {
+        
+        override fun send(outputStream: java.io.OutputStream?) {
+            try {
+                super.send(outputStream)
+            } catch (e: java.net.SocketException) {
+                // Ignore connection reset by peer (client disconnected)
+                // This is common with video players like MPV/VLC performing seek operations
+            } catch (e: Exception) {
+                // Re-throw other exceptions or let them be logged if needed
+                // But generally for a response send, if it fails, it fails.
+                 println("Error sending response: ${e.message}")
+            }
+        }
+    }
+    
     override fun serve(session: IHTTPSession): Response {
         val uri = session.uri
         
         return when {
             uri.startsWith("/video/") -> handleVideoRequest(session)
-            else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
+            else -> createSilentResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
         }
     }
     
     private fun handleVideoRequest(session: IHTTPSession): Response {
         val token = session.uri.removePrefix("/video/")
         val streamingFile = streamingFiles[token]
-            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Video not found")
+            ?: return createSilentResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Video not found")
         
         // Update last access time
         streamingFiles[token] = streamingFile.copy(lastAccessTime = System.currentTimeMillis())
@@ -110,16 +140,16 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
             when (session.method) {
                 Method.HEAD -> handleHeadRequest(streamingFile)
                 Method.GET -> handleGetRequest(session, streamingFile)
-                else -> newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, MIME_PLAINTEXT, "Method not allowed")
+                else -> createSilentResponse(Response.Status.METHOD_NOT_ALLOWED, MIME_PLAINTEXT, "Method not allowed")
             }
         } catch (e: Exception) {
             println("Error handling video request: ${e.message}")
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Server error")
+            createSilentResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Server error")
         }
     }
     
     private fun handleHeadRequest(streamingFile: StreamingFile): Response {
-        val response = newFixedLengthResponse(Response.Status.OK, streamingFile.mimeType, null as InputStream?, 0)
+        val response = createSilentResponse(Response.Status.OK, streamingFile.mimeType, null as InputStream?, 0)
         response.addHeader("Accept-Ranges", "bytes")
         response.addHeader("Content-Length", streamingFile.size.toString())
         addCorsHeaders(response)
@@ -137,7 +167,7 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
     
     private fun handleFullRequest(streamingFile: StreamingFile): Response {
         val inputStream = VideoInputStream(streamingFile.dataProvider, 0, streamingFile.size)
-        val response = newFixedLengthResponse(Response.Status.OK, streamingFile.mimeType, inputStream, streamingFile.size)
+        val response = createSilentResponse(Response.Status.OK, streamingFile.mimeType, inputStream, streamingFile.size)
         response.addHeader("Accept-Ranges", "bytes")
         response.addHeader("Content-Length", streamingFile.size.toString())
         addCorsHeaders(response)
@@ -165,7 +195,7 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         
         // Validate range
         if (start >= streamingFile.size) {
-            val response = newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "Range not satisfiable")
+            val response = createSilentResponse(Response.Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "Range not satisfiable")
             response.addHeader("Content-Range", "bytes */${streamingFile.size}")
             return response
         }
@@ -178,7 +208,7 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         println("Range request: $start-$actualEnd (${contentLength / 1024}KB) of ${streamingFile.size / 1024}KB")
         
         val inputStream = VideoInputStream(streamingFile.dataProvider, start, contentLength)
-        val response = newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, streamingFile.mimeType, inputStream, contentLength)
+        val response = createSilentResponse(Response.Status.PARTIAL_CONTENT, streamingFile.mimeType, inputStream, contentLength)
         response.addHeader("Content-Range", "bytes $start-$actualEnd/${streamingFile.size}")
         response.addHeader("Accept-Ranges", "bytes")
         response.addHeader("Content-Length", contentLength.toString())
@@ -224,19 +254,32 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
             val maxAttempts = 300 // 30 seconds total (100ms * 300)
             
             while (attempts < maxAttempts) {
-                val data = runBlocking {
-                    dataProvider.readBytes(currentOffset, toRead)
-                }
+                // Check if scope is active before blocking runBlocking
+                // However, VideoInputStream close() cancels scope, but we are inside read()
+                // Just proceed.
                 
-                if (data != null && data.isNotEmpty()) {
-                    System.arraycopy(data, 0, b, off, data.size)
-                    currentOffset += data.size
-                    bytesRemaining -= data.size
-                    return data.size
+                try {
+                    val data = runBlocking {
+                        dataProvider.readBytes(currentOffset, toRead)
+                    }
+                    
+                    if (data != null && data.isNotEmpty()) {
+                        System.arraycopy(data, 0, b, off, data.size)
+                        currentOffset += data.size
+                        bytesRemaining -= data.size
+                        return data.size
+                    }
+                } catch (e: Exception) {
+                    println("Error reading video data: ${e.message}")
+                    return -1
                 }
                 
                 // Wait and retry
-                Thread.sleep(100)
+                try {
+                    Thread.sleep(100)
+                } catch (e: InterruptedException) {
+                    return -1
+                }
                 attempts++
             }
             

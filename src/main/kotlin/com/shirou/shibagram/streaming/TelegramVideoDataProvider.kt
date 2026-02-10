@@ -92,17 +92,35 @@ class TelegramVideoDataProvider(
             }
         }
         
-        // Wait for data to be available with timeout
-        val startTime = System.currentTimeMillis()
-        val neededOffset = offset + minOf(length.toLong(), 4096L) // Need at least some data
-        
-        while (downloadedSize.get() < neededOffset && downloadedSize.get() < fileSize) {
-            if (isClosed.get()) return null
-            if (System.currentTimeMillis() - startTime > READ_TIMEOUT_MS) {
-                println("Timeout waiting for data at offset $offset (downloaded: ${downloadedSize.get()})")
+        // Check if we need to download this part specifically (random access)
+        // If the requested offset is beyond what we've downloaded sequentially,
+        // we trigger a high-priority download for just this part.
+        val currentDownloaded = downloadedSize.get()
+        if (offset >= currentDownloaded && offset < fileSize) {
+            println("Random access request: $offset (downloaded: $currentDownloaded)")
+            // Trigger 32KB chunk download for metadata/moov atom
+            // We request slightly more than needed to cover small subsequent reads
+            val partSize = maxOf(length, 128 * 1024) 
+            val success = telegramService.downloadFilePart(fileId, offset, partSize)
+            if (!success) {
+                println("Failed to download part at $offset")
                 return null
             }
-            delay(POLL_INTERVAL_MS)
+            // After successful part download, the file on disk should have the data.
+            // We don't update 'downloadedSize' because that tracks the sequential flow.
+        } else {
+            // Sequential read - wait for data to be available with timeout
+            val startTime = System.currentTimeMillis()
+            val neededOffset = offset + minOf(length.toLong(), 4096L) // Need at least some data
+            
+            while (downloadedSize.get() < neededOffset && downloadedSize.get() < fileSize) {
+                if (isClosed.get()) return null
+                if (System.currentTimeMillis() - startTime > READ_TIMEOUT_MS) {
+                    println("Timeout waiting for data at offset $offset (downloaded: ${downloadedSize.get()})")
+                    return null
+                }
+                delay(POLL_INTERVAL_MS)
+            }
         }
         
         // Read data from file
@@ -110,8 +128,12 @@ class TelegramVideoDataProvider(
             val file = File(localFilePath)
             if (!file.exists()) return null
             
-            val actualLength = minOf(length.toLong(), fileSize - offset, downloadedSize.get() - offset).toInt()
-            if (actualLength <= 0) return null
+            // For random access at the end of file, we might be reading a sparse file.
+            // Ensure we don't read past fileSize
+            val available = fileSize - offset
+            if (available <= 0) return null
+            
+            val actualLength = minOf(length.toLong(), available).toInt()
             
             RandomAccessFile(file, "r").use { raf ->
                 raf.seek(offset)

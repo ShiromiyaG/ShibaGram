@@ -89,35 +89,8 @@ fun main() = application {
     ) {
         window.minimumSize = Dimension(800, 600)
         
-        // Add window focus listener to prevent minimization during video playback
-        DisposableEffect(Unit) {
-            val windowFocusListener = object : java.awt.event.WindowAdapter() {
-                override fun windowDeactivated(e: java.awt.event.WindowEvent?) {
-                    // When the window loses focus while video is playing,
-                    // ensure it stays visible (not minimized)
-                    if (isVideoPlaying) {
-                        javax.swing.SwingUtilities.invokeLater {
-                            if (window.state == java.awt.Frame.ICONIFIED) {
-                                window.state = java.awt.Frame.NORMAL
-                            }
-                        }
-                    }
-                }
-                
-                override fun windowIconified(e: java.awt.event.WindowEvent?) {
-                    // Prevent iconification (minimize) when video is playing
-                    if (isVideoPlaying) {
-                        javax.swing.SwingUtilities.invokeLater {
-                            window.state = java.awt.Frame.NORMAL
-                        }
-                    }
-                }
-            }
-            window.addWindowListener(windowFocusListener)
-            onDispose {
-                window.removeWindowListener(windowFocusListener)
-            }
-        }
+        // Ensure window stays visible during video playback via LaunchedEffect
+        // (Removing AWT listeners that were forcing Frame.NORMAL and breaking fullscreen)
         
         ShibaGramApp(
             isFullscreen = isFullscreen,
@@ -713,9 +686,13 @@ fun ShibaGramApp(
                                                     undecorated = true,
                                                     transparent = true,
                                                     resizable = false,
-                                                    focusable = true,
+                                                    focusable = false,
                                                     title = ""
                                                 ) {
+                                                    val dialogWindow = window
+                                                    LaunchedEffect(dialogWindow) {
+                                                        dialogWindow.isAlwaysOnTop = true
+                                                    }
                                                     ShibaGramTheme(darkTheme = actualDarkTheme) {
                                                         Box(
                                                             modifier = Modifier

@@ -1,11 +1,15 @@
 package com.shirou.shibagram.ui.screens
 
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.*
@@ -14,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.shirou.shibagram.data.dto.MediaCardData
 import com.shirou.shibagram.data.local.ThumbnailCache
@@ -22,6 +27,7 @@ import com.shirou.shibagram.domain.model.ChatFolder
 import com.shirou.shibagram.domain.model.MediaMessage
 import com.shirou.shibagram.domain.model.ViewingMode
 import com.shirou.shibagram.ui.components.*
+import kotlinx.coroutines.launch
 import java.io.File
 
 /**
@@ -89,8 +95,20 @@ fun ChannelsScreen(
                         modifier = Modifier.weight(1f)
                     )
                 } else {
+                    val listState = rememberLazyListState()
+                    val scope = rememberCoroutineScope()
+                    
                     LazyColumn(
-                        modifier = Modifier.weight(1f),
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .pointerInput(Unit) {
+                                detectDragGestures { _, dragAmount ->
+                                    scope.launch {
+                                        listState.scrollBy(-dragAmount.y)
+                                    }
+                                }
+                            },
                         contentPadding = PaddingValues(8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -202,14 +220,27 @@ private fun VideosGrid(
     channelId: Long,
     modifier: Modifier = Modifier
 ) {
+    val scope = rememberCoroutineScope()
+    
     when (viewingMode) {
         ViewingMode.GRID -> {
+            val gridState = rememberLazyGridState()
+            
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 280.dp),
+                state = gridState,
                 contentPadding = PaddingValues(16.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = modifier.fillMaxSize()
+                modifier = modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectDragGestures { _, dragAmount ->
+                            scope.launch {
+                                gridState.scrollBy(-dragAmount.y)
+                            }
+                        }
+                    }
             ) {
                 items(videos) { video ->
                     val cardData = remember(video) {
@@ -235,10 +266,21 @@ private fun VideosGrid(
         }
         
         ViewingMode.LIST, ViewingMode.COMPACT -> {
+            val listState = rememberLazyListState()
+            
             LazyColumn(
+                state = listState,
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = modifier.fillMaxSize()
+                modifier = modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectDragGestures { _, dragAmount ->
+                            scope.launch {
+                                listState.scrollBy(-dragAmount.y)
+                            }
+                        }
+                    }
             ) {
                 items(videos) { video ->
                     val cardData = remember(video) {

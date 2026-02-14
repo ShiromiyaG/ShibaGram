@@ -36,7 +36,7 @@ class UserPreferencesRepository {
         }
     }
     
-    private val _darkTheme = MutableStateFlow(settings[KEY_DARK_THEME, false])
+    private val _darkTheme = MutableStateFlow(settings[KEY_DARK_THEME, true])
     val darkTheme: StateFlow<Boolean> = _darkTheme
     
     private val _viewingMode = MutableStateFlow(

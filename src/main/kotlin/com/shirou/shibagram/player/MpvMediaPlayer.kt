@@ -262,6 +262,15 @@ class MpvMediaPlayer : MediaPlayerEngine {
             LibMpv.INSTANCE.mpv_set_option_string(ctx, "hwdec", "auto-safe")
             LibMpv.INSTANCE.mpv_set_option_string(ctx, "keep-open", "yes")
             LibMpv.INSTANCE.mpv_set_option_string(ctx, "idle", "yes")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "video-sync", "audio")
+            
+            // Buffering options for streaming
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "stream-buffer-size", "8388608")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "cache", "yes")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "cache-secs", "30")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "demuxer-readahead-secs", "30")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "demuxer-max-bytes", "200M")
+            LibMpv.INSTANCE.mpv_set_option_string(ctx, "demuxer-max-back-bytes", "100M")
             
             // Enable logging
             println("MPV createMpvInternal: enabling logging")

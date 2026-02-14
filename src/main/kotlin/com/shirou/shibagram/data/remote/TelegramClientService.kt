@@ -642,6 +642,48 @@ title = content.caption?.text?.takeIf { it.isNotBlank() } ?: fileName ?: "Docume
             null
         }
     }
+    
+    /**
+     * Start downloading a file from a specific offset.
+     * @param fileId The file ID
+     * @param offset The offset to start downloading from
+     * @param limit The number of bytes to download
+     * @param priority Download priority (1 = highest, 32 = normal)
+     */
+    suspend fun startDownload(fileId: Int, offset: Long, limit: Long, priority: Int = 32): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val response = sendAsync(DownloadFile().apply {
+                this.fileId = fileId
+                this.priority = priority
+                this.offset = offset
+                this.limit = limit
+                this.synchronous = false
+            })
+            response is TdApi.File
+        } catch (e: Exception) {
+            println("Error starting download: ${e.message}")
+            false
+        }
+    }
+    
+    /**
+     * Download file synchronously, waiting for the data to be available.
+     */
+    suspend fun downloadFileSync(fileId: Int, offset: Long, limit: Long, priority: Int = 32): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val response = sendAsync(DownloadFile().apply {
+                this.fileId = fileId
+                this.priority = priority
+                this.offset = offset
+                this.limit = limit
+                this.synchronous = true
+            })
+            response is TdApi.File
+        } catch (e: Exception) {
+            println("Error downloading file sync: ${e.message}")
+            false
+        }
+    }
 
     /**
      * Synchronously download a specific part of a file.
@@ -654,10 +696,9 @@ title = content.caption?.text?.takeIf { it.isNotBlank() } ?: fileName ?: "Docume
                 this.priority = 32
                 this.offset = offset
                 this.limit = limit.toLong()
-                this.synchronous = true
+                this.synchronous = false
             })
             
-            // If success, TDLib returns the File object (updated)
             response is TdApi.File
         } catch (e: Exception) {
             println("Error downloading file part: ${e.message}")
@@ -733,7 +774,15 @@ title = content.caption?.text?.takeIf { it.isNotBlank() } ?: fileName ?: "Docume
         }
     }
     
-    fun getFileDownloadProgress(fileId: Int): Flow<Float> = callbackFlow {
+    fun cancelDownload(fileId: Int) {
+        try {
+            client?.send(CancelDownloadFile(fileId, false), null)
+        } catch (e: Exception) {
+            println("Error canceling download: ${e.message}")
+        }
+    }
+    
+    fun getFileDownloadProgress(@Suppress("UNUSED_PARAMETER") fileId: Int): Flow<Float> = callbackFlow {
         trySend(0f)
         awaitClose()
     }

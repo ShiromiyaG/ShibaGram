@@ -107,13 +107,6 @@ fun ShibaGramApp(
     onFullscreenChange: (Boolean) -> Unit = {},
     onVideoPlayingChange: (Boolean) -> Unit = {}
 ) {
-    // State
-    var isDarkTheme by remember { mutableStateOf(false) }
-    val systemDarkTheme = isSystemInDarkTheme()
-    
-    // Use system theme by default
-    val actualDarkTheme = isDarkTheme || systemDarkTheme
-    
     // Repositories
     val authRepository = remember { TelegramAuthRepository() }
     val channelsRepository = remember { TelegramChannelsRepository() }
@@ -124,6 +117,7 @@ fun ShibaGramApp(
     // Player preferences (persisted)
     val userPrefs = remember { com.shirou.shibagram.data.preferences.UserPreferencesRepository.getInstance() }
     var playerType by remember { mutableStateOf(userPrefs.playerType) }
+    var isDarkTheme by remember { mutableStateOf(userPrefs.darkTheme.value) }
 
     // MPV controls visibility (managed here because Canvas mouse listener lives here)
     var showMpvControls by remember { mutableStateOf(true) }
@@ -417,17 +411,6 @@ watchHistoryRepository.saveProgress(
                     )
                     activeDataProvider = dataProvider
                     
-                    // Wait for initial buffer before starting playback
-                    println("Buffering video (${fileSize / 1024 / 1024}MB total)...")
-                    val bufferReady = dataProvider.waitForBuffer()
-                    if (!bufferReady) {
-                        println("Failed to buffer video")
-                        dataProvider.close()
-                        activeDataProvider = null
-                        return@launch
-                    }
-                    println("Buffer ready")
-                    
                     // Always use HTTP streaming for incomplete files.
                     // TDLib stores incomplete files in a temp directory without extensions (e.g. just a number).
                     // MPV/VLC fail to detect the format of these extensionless files.
@@ -477,7 +460,7 @@ watchHistoryRepository.saveProgress(
         }
     }
     
-    ShibaGramTheme(darkTheme = actualDarkTheme) {
+    ShibaGramTheme(darkTheme = isDarkTheme) {
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background
@@ -762,7 +745,7 @@ watchHistoryRepository.saveProgress(
                                                     LaunchedEffect(dialogWindow) {
                                                         dialogWindow.isAlwaysOnTop = true
                                                     }
-                                                    ShibaGramTheme(darkTheme = actualDarkTheme) {
+                                                    ShibaGramTheme(darkTheme = isDarkTheme) {
                                                         Box(
                                                             modifier = Modifier
                                                                 .fillMaxSize()
@@ -960,7 +943,10 @@ watchHistoryRepository.saveProgress(
                                     
                                     2 -> SettingsScreen(
                                         isDarkTheme = isDarkTheme,
-                                        onDarkThemeChange = { isDarkTheme = it },
+                                        onDarkThemeChange = { 
+                                            isDarkTheme = it
+                                            userPrefs.setDarkTheme(it)
+                                        },
                                         autoPlayNext = autoPlayNext,
                                         onAutoPlayNextChange = { autoPlayNext = it },
                                         downloadPath = downloadPath,

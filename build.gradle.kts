@@ -176,6 +176,19 @@ tasks.test {
 
 kotlin {
     jvmToolchain(17)
+    compilerOptions {
+        freeCompilerArgs.addAll("-Xjsr305=strict", "-opt-in=kotlin.RequiresOptIn")
+        allWarningsAsErrors.set(false)
+    }
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions {
+        if (project.hasProperty("release")) {
+            freeCompilerArgs.add("-Xno-param-assertions")
+            freeCompilerArgs.add("-Xno-call-assertions")
+        }
+    }
 }
 
 // Set java.library.path to include project root for tdjni.dll

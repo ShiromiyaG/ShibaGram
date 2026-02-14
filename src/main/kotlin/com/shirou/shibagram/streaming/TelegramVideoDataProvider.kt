@@ -5,13 +5,12 @@ import org.drinkless.tdlib.TdApi
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
-/**
- * Data provider that streams video data from Telegram progressively.
- * Reads directly from the file being downloaded by TDLib.
- */
 class TelegramVideoDataProvider(
     private val telegramService: TelegramClientService,
     private val fileId: Int,
@@ -19,171 +18,238 @@ class TelegramVideoDataProvider(
 ) : VideoStreamingServer.VideoDataProvider {
     
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val downloadedSize = AtomicLong(0)
-    private val isDownloading = AtomicBoolean(false)
     private val isClosed = AtomicBoolean(false)
     
-    private var localFilePath: String = ""
-    private var downloadJob: Job? = null
+    @Volatile private var currentFile: TdApi.File? = null
+    private val fileStateLock = ReentrantReadWriteLock()
+    private val readLock = fileStateLock.readLock()
+    private val writeLock = fileStateLock.writeLock()
+    
+    private val pendingDownloads = ConcurrentHashMap<String, CompletableDeferred<TdApi.File?>>()
     
     companion object {
-        const val MIN_BUFFER_SIZE = 2 * 1024 * 1024L // 2MB minimum buffer before playback (needed for AV1/MKV headers)
-        const val READ_TIMEOUT_MS = 120000L // 120 seconds timeout
-        const val POLL_INTERVAL_MS = 50L
+        private const val MIN_DOWNLOAD_SIZE = 1048576L // 1MB
+        private const val OPTIMAL_DOWNLOAD_SIZE = 52428800L // 50MB
+        private const val SEEK_DOWNLOAD_SIZE = 2097152L // 2MB for seeks
+        private const val READ_TIMEOUT_MS = 30000L
     }
     
     init {
-        startDownload()
+        startBackgroundDownload()
     }
     
-    private fun startDownload() {
-        if (isDownloading.getAndSet(true)) return
-        
-        downloadJob = scope.launch {
+    private fun startBackgroundDownload() {
+        scope.launch {
             try {
-                // Start download and poll for progress
-                telegramService.downloadFileProgressively(fileId) { _, _, filePath ->
-                    if (isClosed.get()) return@downloadFileProgressively
-                    localFilePath = filePath
-                }
+                // Start download from beginning with high priority
+                telegramService.startDownload(fileId, 0, OPTIMAL_DOWNLOAD_SIZE, 1)
             } catch (e: Exception) {
-                if (!isClosed.get()) {
-                    println("Download error: ${e.message}")
-                }
+                println("Error starting background download: ${e.message}")
             }
         }
         
-        // Also start a polling job to track download progress
+        // Poll for file updates
         scope.launch {
             while (!isClosed.get()) {
                 try {
                     val fileInfo = telegramService.getFileInfo(fileId)
                     if (fileInfo != null) {
-                        val local = fileInfo.local
-                        val downloadedBytes = local?.downloadedSize ?: 0
-                        downloadedSize.set(downloadedBytes)
-                        if (localFilePath.isEmpty()) {
-                            localFilePath = local?.path ?: ""
+                        writeLock.lock()
+                        try {
+                            currentFile = fileInfo
+                        } finally {
+                            writeLock.unlock()
                         }
-                        if (local?.isDownloadingCompleted == true) {
-                            downloadedSize.set(fileSize)
+                        
+                        // Complete any pending downloads that now have data
+                        checkPendingDownloads(fileInfo)
+                        
+                        if (fileInfo.local.isDownloadingCompleted) {
                             break
                         }
                     }
                 } catch (e: Exception) {
-                    // Ignore polling errors
                 }
-                delay(POLL_INTERVAL_MS)
+                delay(50)
             }
+        }
+    }
+    
+    private fun checkPendingDownloads(file: TdApi.File) {
+        val local = file.local
+        val downloadOffset = local.downloadOffset
+        val downloadedPrefixSize = local.downloadedPrefixSize
+        val availableEnd = downloadOffset + downloadedPrefixSize
+        
+        pendingDownloads.entries.toList().forEach { (key, deferred) ->
+            val parts = key.split(":")
+            if (parts.size == 2) {
+                val offset = parts[0].toLong()
+                val length = parts[1].toLong()
+                
+                if (offset < availableEnd && !deferred.isCompleted) {
+                    deferred.complete(file)
+                }
+            }
+        }
+    }
+    
+    private fun isRangeAvailable(offset: Long, length: Int): Boolean {
+        readLock.lock()
+        try {
+            val file = currentFile ?: return false
+            val local = file.local
+            val path = local.path
+            
+            if (path.isEmpty() || !File(path).exists()) {
+                return false
+            }
+            
+            if (local.isDownloadingCompleted) {
+                return true
+            }
+            
+            val downloadOffset = local.downloadOffset
+            val downloadedPrefixSize = local.downloadedPrefixSize
+            
+            return offset >= downloadOffset && (offset + length) <= (downloadOffset + downloadedPrefixSize)
+        } finally {
+            readLock.unlock()
+        }
+    }
+    
+    private suspend fun ensureDataAvailable(offset: Long, length: Int): Boolean {
+        if (isRangeAvailable(offset, length)) {
+            return true
+        }
+        
+        val key = "$offset:$length"
+        val deferred = CompletableDeferred<TdApi.File?>()
+        pendingDownloads[key] = deferred
+        
+        try {
+            scope.launch {
+                try {
+                    telegramService.startDownload(fileId, offset, SEEK_DOWNLOAD_SIZE, 32)
+                } catch (e: Exception) {
+                    deferred.complete(null)
+                }
+            }
+            
+            return withTimeout(READ_TIMEOUT_MS) {
+                val file = deferred.await()
+                file != null && isRangeAvailable(offset, length)
+            }
+        } catch (e: TimeoutCancellationException) {
+            println("Timeout waiting for data at offset $offset")
+            return false
+        } finally {
+            pendingDownloads.remove(key)
         }
     }
     
     override suspend fun readBytes(offset: Long, length: Int): ByteArray? {
         if (isClosed.get()) return null
-        if (localFilePath.isEmpty()) {
-            // Wait for file path to become available
-            val startTime = System.currentTimeMillis()
-            while (localFilePath.isEmpty() && !isClosed.get()) {
-                if (System.currentTimeMillis() - startTime > READ_TIMEOUT_MS) {
-                    println("Timeout waiting for file path")
-                    return null
-                }
-                delay(POLL_INTERVAL_MS)
-            }
+        
+        // Fast path: data already available
+        if (isRangeAvailable(offset, length)) {
+            return readFromFile(offset, length)
         }
         
-        // Check if we need to download this part specifically (random access)
-        // If the requested offset is beyond what we've downloaded sequentially,
-        // we trigger a high-priority download for just this part.
-        val currentDownloaded = downloadedSize.get()
-        if (offset >= currentDownloaded && offset < fileSize) {
-            println("Random access request: $offset (downloaded: $currentDownloaded)")
-            // Trigger 32KB chunk download for metadata/moov atom
-            // We request slightly more than needed to cover small subsequent reads
-            val partSize = maxOf(length, 128 * 1024) 
-            val success = telegramService.downloadFilePart(fileId, offset, partSize)
+        // Wait for data to be downloaded
+        val startTime = System.currentTimeMillis()
+        while (!isClosed.get()) {
+            if (isRangeAvailable(offset, length)) {
+                return readFromFile(offset, length)
+            }
+            
+            // Request download synchronously
+            val success = telegramService.downloadFileSync(fileId, offset, SEEK_DOWNLOAD_SIZE, 32)
             if (!success) {
-                println("Failed to download part at $offset")
-                return null
-            }
-            // After successful part download, the file on disk should have the data.
-            // We don't update 'downloadedSize' because that tracks the sequential flow.
-        } else {
-            // Sequential read - wait for data to be available with timeout
-            val startTime = System.currentTimeMillis()
-            val neededOffset = offset + minOf(length.toLong(), 4096L) // Need at least some data
-            
-            while (downloadedSize.get() < neededOffset && downloadedSize.get() < fileSize) {
-                if (isClosed.get()) return null
                 if (System.currentTimeMillis() - startTime > READ_TIMEOUT_MS) {
-                    println("Timeout waiting for data at offset $offset (downloaded: ${downloadedSize.get()})")
+                    println("Timeout reading at offset $offset")
                     return null
                 }
-                delay(POLL_INTERVAL_MS)
             }
+            
+            delay(20)
         }
         
-        // Read data from file
-        return try {
-            val file = File(localFilePath)
-            if (!file.exists()) return null
+        return null
+    }
+    
+    private fun readFromFile(offset: Long, length: Int): ByteArray? {
+        readLock.lock()
+        try {
+            val file = currentFile ?: return null
+            val path = file.local.path
             
-            // For random access at the end of file, we might be reading a sparse file.
-            // Ensure we don't read past fileSize
-            val available = fileSize - offset
-            if (available <= 0) return null
+            if (path.isEmpty()) return null
             
-            val actualLength = minOf(length.toLong(), available).toInt()
+            val localFile = File(path)
+            if (!localFile.exists()) return null
             
-            RandomAccessFile(file, "r").use { raf ->
-                raf.seek(offset)
-                val buffer = ByteArray(actualLength)
-                val bytesRead = raf.read(buffer)
-                if (bytesRead > 0) {
-                    if (bytesRead < actualLength) buffer.copyOf(bytesRead) else buffer
-                } else {
-                    null
+            val actualLength = minOf(length.toLong(), fileSize - offset).toInt()
+            if (actualLength <= 0) return null
+            
+            return try {
+                RandomAccessFile(localFile, "r").use { raf ->
+                    raf.seek(offset)
+                    val buffer = ByteArray(actualLength)
+                    val bytesRead = raf.read(buffer)
+                    if (bytesRead > 0) {
+                        if (bytesRead < actualLength) buffer.copyOf(bytesRead) else buffer
+                    } else {
+                        null
+                    }
                 }
+            } catch (e: Exception) {
+                println("Error reading from file at offset $offset: ${e.message}")
+                null
             }
-        } catch (e: Exception) {
-            println("Error reading from file: ${e.message}")
-            null
+        } finally {
+            readLock.unlock()
         }
     }
     
     override fun getAvailableDataSize(offset: Long): Long {
-        val downloaded = downloadedSize.get()
-        return if (downloaded > offset) downloaded - offset else 0
-    }
-    
-    fun isBufferReady(): Boolean {
-        return downloadedSize.get() >= MIN_BUFFER_SIZE || downloadedSize.get() >= fileSize
-    }
-    
-    suspend fun waitForBuffer(): Boolean {
-        val startTime = System.currentTimeMillis()
-        val neededKB = MIN_BUFFER_SIZE / 1024
-        var lastPrint = 0L
-        while (!isBufferReady()) {
-            if (isClosed.get()) return false
-            if (System.currentTimeMillis() - startTime > READ_TIMEOUT_MS) {
-                println("Buffer timeout - downloaded: ${downloadedSize.get() / 1024}KB, needed: ${neededKB}KB")
-                return false
+        readLock.lock()
+        try {
+            val file = currentFile ?: return 0
+            val local = file.local
+            val path = local.path
+            
+            if (path.isEmpty() || !File(path).exists()) {
+                return 0
             }
-            delay(100)
-            // Only print every 500ms to reduce spam
-            if (System.currentTimeMillis() - lastPrint > 500) {
-                val downloadedKB = downloadedSize.get() / 1024
-                println("Buffering: ${downloadedKB}KB / ${neededKB}KB")
-                lastPrint = System.currentTimeMillis()
+            
+            if (local.isDownloadingCompleted) {
+                return maxOf(0L, fileSize - offset)
             }
+            
+            val downloadOffset = local.downloadOffset
+            val downloadedPrefixSize = local.downloadedPrefixSize
+            val availableEnd = downloadOffset + downloadedPrefixSize
+            
+            return if (offset >= downloadOffset && offset < availableEnd) {
+                availableEnd - offset
+            } else {
+                0
+            }
+        } finally {
+            readLock.unlock()
         }
-        return true
     }
     
     override fun close() {
         if (isClosed.getAndSet(true)) return
-        downloadJob?.cancel()
         scope.cancel()
+        pendingDownloads.values.forEach { it.cancel() }
+        pendingDownloads.clear()
+        
+        try {
+            telegramService.cancelDownload(fileId)
+        } catch (e: Exception) {
+        }
     }
 }

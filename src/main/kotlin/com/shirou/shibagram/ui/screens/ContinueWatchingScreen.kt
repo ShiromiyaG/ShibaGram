@@ -1,34 +1,38 @@
 package com.shirou.shibagram.ui.screens
 
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.shirou.shibagram.data.dto.MediaCardData
 import com.shirou.shibagram.domain.model.MediaMessage
 import com.shirou.shibagram.domain.model.ViewingMode
 import com.shirou.shibagram.ui.components.*
+import kotlinx.coroutines.launch
 
-/**
- * Continue watching screen showing videos with progress.
- */
 @Composable
 fun ContinueWatchingScreen(
-    videos: List<Pair<MediaMessage, Float>>, // Video with progress ratio
+    videos: List<Pair<MediaMessage, Float>>,
     onVideoClick: (MediaMessage) -> Unit,
     viewingMode: ViewingMode,
     modifier: Modifier = Modifier
 ) {
+    val scope = rememberCoroutineScope()
+    
     Column(modifier = modifier.fillMaxSize()) {
-        // Header
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.surface
@@ -58,12 +62,23 @@ fun ContinueWatchingScreen(
         } else {
             when (viewingMode) {
                 ViewingMode.GRID -> {
+                    val gridState = rememberLazyGridState()
+                    
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = 280.dp),
+                        state = gridState,
                         contentPadding = PaddingValues(16.dp),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                detectDragGestures { _, dragAmount ->
+                                    scope.launch {
+                                        gridState.scrollBy(-dragAmount.y)
+                                    }
+                                }
+                            }
                     ) {
                         items(videos) { (video, progress) ->
                             val cardData = remember(video, progress) {
@@ -83,10 +98,21 @@ fun ContinueWatchingScreen(
                 }
                 
                 ViewingMode.LIST, ViewingMode.COMPACT -> {
+                    val listState = rememberLazyListState()
+                    
                     LazyColumn(
+                        state = listState,
                         contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                detectDragGestures { _, dragAmount ->
+                                    scope.launch {
+                                        listState.scrollBy(-dragAmount.y)
+                                    }
+                                }
+                            }
                     ) {
                         items(videos) { (video, progress) ->
                             val cardData = remember(video, progress) {

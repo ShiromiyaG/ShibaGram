@@ -24,7 +24,7 @@ class UserPreferencesRepository {
         private const val KEY_LAST_CHANNEL_ID = "last_channel_id"
         private const val KEY_VOLUME = "volume"
         private const val KEY_PLAYER_TYPE = "player_type"
-        private const val KEY_MPV_PATH = "mpv_path"
+        private const val KEY_MAX_CACHE_SIZE_GB = "max_cache_size_gb"
         
         @Volatile
         private var instance: UserPreferencesRepository? = null
@@ -85,11 +85,11 @@ class UserPreferencesRepository {
 
     var playerType: PlayerType
         get() = try {
-            PlayerType.valueOf(settings[KEY_PLAYER_TYPE, PlayerType.VLC.name])
-        } catch (_: Exception) { PlayerType.VLC }
+            PlayerType.valueOf(settings[KEY_PLAYER_TYPE, PlayerType.MPV.name])
+        } catch (_: Exception) { PlayerType.MPV }
         set(value) { settings[KEY_PLAYER_TYPE] = value.name }
 
-    var mpvPath: String
-        get() = settings[KEY_MPV_PATH, ""]
-        set(value) { settings[KEY_MPV_PATH] = value }
+    var maxCacheSizeGb: Float
+        get() = settings[KEY_MAX_CACHE_SIZE_GB, 2f]
+        set(value) { settings[KEY_MAX_CACHE_SIZE_GB] = value }
 }

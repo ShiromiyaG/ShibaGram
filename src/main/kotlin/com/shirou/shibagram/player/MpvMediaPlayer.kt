@@ -15,14 +15,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * mpv renders directly into an embedded AWT Canvas via the `wid` option,
  * providing hardware-accelerated playback.
  */
-class MpvMediaPlayer(
-    private val customMpvPath: String? = null // Ignored in this implementation, uses libs/libmpv-2.dll
-) : MediaPlayerEngine {
+class MpvMediaPlayer : MediaPlayerEngine {
 
     // ---- State flows -----------------------------------------------------
 
     private val _currentFrame = MutableStateFlow<ImageBitmap?>(null)
-    override val currentFrame: StateFlow<ImageBitmap?> = _currentFrame // always null ÔÇô mpv renders natively
+    override val currentFrame: StateFlow<ImageBitmap?> = _currentFrame // always null – mpv renders natively
 
     private val _isPlaying = MutableStateFlow(false)
     override val isPlaying: StateFlow<Boolean> = _isPlaying

@@ -21,11 +21,13 @@ class VideoPlaybackRepository {
         val isCompleted: Boolean
     )
     
-    fun saveProgress(
+fun saveProgress(
         messageId: Long,
         chatId: Long,
         position: Long,
-        duration: Long
+        duration: Long,
+        title: String? = null,
+        thumbnailPath: String? = null
     ) {
         val isCompleted = duration > 0 && position.toFloat() / duration >= 0.9f
         
@@ -37,6 +39,8 @@ class VideoPlaybackRepository {
                 it[PlaybackProgressTable.duration] = duration
                 it[lastUpdated] = System.currentTimeMillis()
                 it[PlaybackProgressTable.isCompleted] = isCompleted
+                title?.let { t -> it[PlaybackProgressTable.title] = t }
+                thumbnailPath?.let { tp -> it[PlaybackProgressTable.thumbnailPath] = tp }
             }
         }
     }

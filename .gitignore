@@ -65,6 +65,7 @@ tdlib-data/
 tdlib_data/
 .tdlib/
 telegram-data/
+telemetry-id
 
 # =============================================
 # Compose Desktop Build Artifacts

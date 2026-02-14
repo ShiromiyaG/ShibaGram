@@ -18,8 +18,10 @@ object ShibaGramDatabase {
             driver = "org.sqlite.JDBC"
         )
         
-        transaction(database) {
-            SchemaUtils.create(PlaybackProgressTable, SavedVideosTable, ChannelCacheTable)
+transaction(database) {
+            SchemaUtils.create(PlaybackProgressTable, SavedVideosTable, ChannelCacheTable, WatchedChannelsTable)
+            try { exec("ALTER TABLE playback_progress ADD COLUMN title VARCHAR(500)") } catch (_: Exception) {}
+            try { exec("ALTER TABLE playback_progress ADD COLUMN thumbnail_path VARCHAR(1000)") } catch (_: Exception) {}
         }
         
         database
@@ -45,6 +47,8 @@ object PlaybackProgressTable : Table("playback_progress") {
     val duration = long("duration")
     val lastUpdated = long("last_updated")
     val isCompleted = bool("is_completed").default(false)
+    val title = varchar("title", 500).nullable()
+    val thumbnailPath = varchar("thumbnail_path", 1000).nullable()
     
     override val primaryKey = PrimaryKey(messageId)
 }
@@ -77,4 +81,11 @@ object ChannelCacheTable : Table("channel_cache") {
     val lastUpdated = long("last_updated")
     
     override val primaryKey = PrimaryKey(channelId)
+}
+
+object WatchedChannelsTable : Table("watched_channels") {
+    val chatId = long("chat_id").uniqueIndex()
+    val lastWatched = long("last_watched")
+    
+    override val primaryKey = PrimaryKey(chatId)
 }

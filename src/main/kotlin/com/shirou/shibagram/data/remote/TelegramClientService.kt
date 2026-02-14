@@ -514,7 +514,7 @@ class TelegramClientService : AutoCloseable {
                                     caption = content.caption?.text,
                                     mimeType = video.mimeType ?: "",
                                     chatId = msg.chatId,
-                                    title = video.fileName ?: "Video"
+title = content.caption?.text?.takeIf { it.isNotBlank() } ?: video.fileName ?: "Video"
                                 ))
                             }
                         }
@@ -591,7 +591,7 @@ class TelegramClientService : AutoCloseable {
                                         caption = content.caption?.text,
                                         mimeType = mimeType ?: "",
                                         chatId = msg.chatId,
-                                        title = fileName ?: "Document"
+title = content.caption?.text?.takeIf { it.isNotBlank() } ?: fileName ?: "Document"
                                     ))
                                 }
                             }
@@ -809,7 +809,7 @@ class TelegramClientService : AutoCloseable {
                                 caption = content.caption?.text,
                                 mimeType = video.mimeType ?: "",
                                 chatId = msg.chatId,
-                                title = video.fileName ?: "Video"
+title = content.caption?.text?.takeIf { it.isNotBlank() } ?: video.fileName ?: "Video"
                             ))
                         }
                     }
@@ -852,7 +852,7 @@ class TelegramClientService : AutoCloseable {
                                     caption = content.caption?.text,
                                     mimeType = doc.mimeType ?: "",
                                     chatId = msg.chatId,
-                                    title = doc.fileName ?: "Document"
+title = content.caption?.text?.takeIf { it.isNotBlank() } ?: doc.fileName ?: "Document"
                                 ))
                             }
                         }
@@ -905,7 +905,7 @@ class TelegramClientService : AutoCloseable {
                                                 caption = content.caption?.text,
                                                 mimeType = video.mimeType ?: "",
                                                 chatId = msg.chatId,
-                                                title = video.fileName ?: "Video"
+title = content.caption?.text?.takeIf { it.isNotBlank() } ?: video.fileName ?: "Video"
                                             ))
                                         }
                                     }
@@ -930,6 +930,85 @@ class TelegramClientService : AutoCloseable {
         }
         
         close()
+    }
+    
+    suspend fun getMessage(chatId: Long, messageId: Long): MediaMessage? = withContext(Dispatchers.IO) {
+        try {
+            val response = sendAsync(GetMessage().apply {
+                this.chatId = chatId
+                this.messageId = messageId
+            })
+            
+            if (response is Message) {
+                val content = response.content
+                
+                when (content) {
+                    is MessageVideo -> {
+                        val video = content.video
+                        val file = video.video
+                        val local = file.local
+                        val thumbnail = video.thumbnail
+                        
+                        var thumbnailPath = thumbnail?.file?.local?.path?.takeIf { it.isNotEmpty() }
+                        
+                        MediaMessage(
+                            id = response.id,
+                            date = response.date,
+                            videoFile = VideoFile(
+                                id = file.id,
+                                size = file.size,
+                                downloadedSize = local.downloadedSize,
+                                localPath = local.path?.takeIf { it.isNotEmpty() },
+                                isDownloading = local.isDownloadingActive,
+                                isDownloaded = local.isDownloadingCompleted
+                            ),
+                            filename = video.fileName,
+                            thumbnailFileId = thumbnail?.file?.id,
+                            thumbnail = thumbnailPath,
+                            duration = video.duration,
+                            width = video.width,
+                            height = video.height,
+                            caption = content.caption?.text,
+                            mimeType = video.mimeType ?: "",
+                            chatId = chatId,
+                            title = content.caption?.text?.takeIf { it.isNotBlank() } ?: video.fileName ?: "Video"
+                        )
+                    }
+                    is MessageDocument -> {
+                        val doc = content.document
+                        val file = doc.document
+                        val local = file.local
+                        val thumbnail = doc.thumbnail
+                        
+                        var thumbnailPath = thumbnail?.file?.local?.path?.takeIf { it.isNotEmpty() }
+                        
+                        MediaMessage(
+                            id = response.id,
+                            date = response.date,
+                            videoFile = VideoFile(
+                                id = file.id,
+                                size = file.size,
+                                downloadedSize = local.downloadedSize,
+                                localPath = local.path?.takeIf { it.isNotEmpty() },
+                                isDownloading = local.isDownloadingActive,
+                                isDownloaded = local.isDownloadingCompleted
+                            ),
+                            filename = doc.fileName,
+                            thumbnailFileId = thumbnail?.file?.id,
+                            thumbnail = thumbnailPath,
+                            caption = content.caption?.text,
+                            mimeType = doc.mimeType ?: "",
+                            chatId = chatId,
+                            title = content.caption?.text?.takeIf { it.isNotBlank() } ?: doc.fileName ?: "Document"
+                        )
+                    }
+                    else -> null
+                }
+            } else null
+        } catch (e: Exception) {
+            println("Error getting message: ${e.message}")
+            null
+        }
     }
     
     override fun close() {

@@ -52,9 +52,10 @@ data class MediaCardData(
                 qualityLabel = mediaMessage.qualityLabel ?: "",
                 progressRatio = progressRatio,
                 hasProgress = playbackPosition > 0,
-                videoTitle = mediaMessage.title.ifEmpty { 
-                    mediaMessage.filename ?: "Video ${mediaMessage.id}"
-                },
+                videoTitle = mediaMessage.caption?.takeIf { it.isNotBlank() }
+                    ?: mediaMessage.title.ifEmpty { 
+                        mediaMessage.filename ?: "Video ${mediaMessage.id}"
+                    },
                 formattedSize = mediaMessage.formattedSize,
                 formattedDuration = mediaMessage.formattedDuration,
                 durationText = mediaMessage.formattedDuration

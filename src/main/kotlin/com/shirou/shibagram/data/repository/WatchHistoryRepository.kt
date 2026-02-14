@@ -3,6 +3,7 @@ package com.shirou.shibagram.data.repository
 import com.shirou.shibagram.data.local.PlaybackProgressTable
 import com.shirou.shibagram.data.local.SavedVideosTable
 import com.shirou.shibagram.data.local.ShibaGramDatabase
+import com.shirou.shibagram.data.local.WatchedChannelsTable
 import com.shirou.shibagram.domain.model.MediaMessage
 import com.shirou.shibagram.domain.model.VideoFile
 import kotlinx.coroutines.Dispatchers
@@ -13,9 +14,6 @@ import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
 
-/**
- * Repository for managing watch history, playback progress, and saved videos.
- */
 class WatchHistoryRepository {
     
     private val _continueWatchingVideos = MutableStateFlow<List<Pair<MediaMessage, Float>>>(emptyList())
@@ -23,6 +21,9 @@ class WatchHistoryRepository {
     
     private val _savedVideos = MutableStateFlow<List<MediaMessage>>(emptyList())
     val savedVideos = _savedVideos.asStateFlow()
+    
+    private val _watchedChannelIds = MutableStateFlow<List<Long>>(emptyList())
+    val watchedChannelIds = _watchedChannelIds.asStateFlow()
     
     init {
         try {
@@ -62,7 +63,9 @@ class WatchHistoryRepository {
                                     isDownloading = false,
                                     isDownloaded = false
                                 ),
-                                duration = (duration / 1000).toInt()
+                                duration = (duration / 1000).toInt(),
+                                thumbnail = row[PlaybackProgressTable.thumbnailPath],
+                                title = row[PlaybackProgressTable.title] ?: ""
                             )
                             videos.add(video to progress)
                         }
@@ -115,11 +118,13 @@ class WatchHistoryRepository {
     /**
      * Save playback progress for a video.
      */
-    suspend fun saveProgress(
+suspend fun saveProgress(
         messageId: Long,
         chatId: Long,
         position: Long,
-        duration: Long
+        duration: Long,
+        title: String? = null,
+        thumbnailPath: String? = null
     ) = withContext(Dispatchers.IO) {
         try {
             val isCompleted = duration > 0 && position.toFloat() / duration.toFloat() > 0.95f
@@ -134,6 +139,8 @@ class WatchHistoryRepository {
                         it[PlaybackProgressTable.duration] = duration
                         it[lastUpdated] = System.currentTimeMillis()
                         it[PlaybackProgressTable.isCompleted] = isCompleted
+                        title?.let { t -> it[PlaybackProgressTable.title] = t }
+                        thumbnailPath?.let { tp -> it[PlaybackProgressTable.thumbnailPath] = tp }
                     }
                 } else {
                     PlaybackProgressTable.insert {
@@ -143,6 +150,8 @@ class WatchHistoryRepository {
                         it[PlaybackProgressTable.duration] = duration
                         it[lastUpdated] = System.currentTimeMillis()
                         it[PlaybackProgressTable.isCompleted] = isCompleted
+                        title?.let { t -> it[PlaybackProgressTable.title] = t }
+                        thumbnailPath?.let { tp -> it[PlaybackProgressTable.thumbnailPath] = tp }
                     }
                 }
             }
@@ -243,9 +252,34 @@ class WatchHistoryRepository {
         }
     }
     
-    /**
-     * Clear all watch history.
-     */
+    suspend fun updateWatchedChannel(chatId: Long) = withContext(Dispatchers.IO) {
+        try {
+            transaction(ShibaGramDatabase.getDatabase()) {
+                WatchedChannelsTable.upsert(WatchedChannelsTable.chatId) {
+                    it[WatchedChannelsTable.chatId] = chatId
+                    it[WatchedChannelsTable.lastWatched] = System.currentTimeMillis()
+                }
+            }
+            loadWatchedChannels()
+        } catch (e: Exception) {
+            println("Error updating watched channel: ${e.message}")
+        }
+    }
+    
+    suspend fun loadWatchedChannels() = withContext(Dispatchers.IO) {
+        try {
+            val channelIds = transaction(ShibaGramDatabase.getDatabase()) {
+                WatchedChannelsTable.selectAll()
+                    .orderBy(WatchedChannelsTable.lastWatched, SortOrder.DESC)
+                    .limit(5)
+                    .map { it[WatchedChannelsTable.chatId] }
+            }
+            _watchedChannelIds.value = channelIds
+        } catch (e: Exception) {
+            println("Error loading watched channels: ${e.message}")
+        }
+    }
+    
     suspend fun clearWatchHistory() = withContext(Dispatchers.IO) {
         try {
             transaction(ShibaGramDatabase.getDatabase()) {

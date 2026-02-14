@@ -1,11 +1,14 @@
 package com.shirou.shibagram.ui.screens
 
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -17,7 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.painter.BitmapPainter
-import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.shirou.shibagram.data.dto.MediaCardData
@@ -25,7 +28,7 @@ import com.shirou.shibagram.data.local.ThumbnailCache
 import com.shirou.shibagram.domain.model.Channel
 import com.shirou.shibagram.domain.model.MediaMessage
 import com.shirou.shibagram.ui.components.*
-import java.io.File
+import kotlinx.coroutines.launch
 
 /**
  * Home screen with Material Design 3.
@@ -91,11 +94,22 @@ fun HomeScreen(
                     title = "Continue Watching",
                     showSeeAll = false
                 ) {
+                    val listState = rememberLazyListState()
+                    val scope = rememberCoroutineScope()
+                    
                     LazyRow(
+                        state = listState,
                         contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.pointerInput(Unit) {
+                            detectDragGestures { _, dragAmount ->
+                                scope.launch {
+                                    listState.scrollBy(-dragAmount.x)
+                                }
+                            }
+                        }
                     ) {
-                        items(continueWatchingVideos.take(10)) { (video, progress) ->
+                        items(continueWatchingVideos.take(10), key = { it.first.id }) { (video, progress) ->
                             val cardData = remember(video, progress) {
                                 MediaCardData.fromMediaMessage(
                                     video,
@@ -105,7 +119,6 @@ fun HomeScreen(
                                 )
                             }
                             
-                            // Load thumbnail
                             var thumbnailBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
                             LaunchedEffect(video.thumbnail) {
                                 video.thumbnail?.let { path ->
@@ -133,16 +146,26 @@ fun HomeScreen(
                     title = "Saved Videos",
                     showSeeAll = false
                 ) {
+                    val listState = rememberLazyListState()
+                    val scope = rememberCoroutineScope()
+                    
                     LazyRow(
+                        state = listState,
                         contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.pointerInput(Unit) {
+                            detectDragGestures { _, dragAmount ->
+                                scope.launch {
+                                    listState.scrollBy(-dragAmount.x)
+                                }
+                            }
+                        }
                     ) {
-                        items(savedVideos.take(10)) { video ->
+                        items(savedVideos.take(10), key = { it.id }) { video ->
                             val cardData = remember(video) {
                                 MediaCardData.fromMediaMessage(video, video.chatId)
                             }
                             
-                            // Load thumbnail
                             var thumbnailBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
                             LaunchedEffect(video.thumbnail) {
                                 video.thumbnail?.let { path ->
@@ -171,16 +194,26 @@ fun HomeScreen(
                         title = channel.name,
                         onSeeAll = { onChannelClick(channel) }
                     ) {
+                        val listState = rememberLazyListState()
+                        val scope = rememberCoroutineScope()
+                        
                         LazyRow(
+                            state = listState,
                             contentPadding = PaddingValues(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            modifier = Modifier.pointerInput(Unit) {
+                                detectDragGestures { _, dragAmount ->
+                                    scope.launch {
+                                        listState.scrollBy(-dragAmount.x)
+                                    }
+                                }
+                            }
                         ) {
-                            items(videos.take(10)) { video ->
+                            items(videos.take(10), key = { it.id }) { video ->
                                 val cardData = remember(video) {
                                     MediaCardData.fromMediaMessage(video, channel.id)
                                 }
                                 
-                                // Load thumbnail
                                 var thumbnailBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
                                 LaunchedEffect(video.thumbnail) {
                                     video.thumbnail?.let { path ->
@@ -274,9 +307,6 @@ private fun HomeSection(
     }
 }
 
-/**
- * Load an image from file path as ImageBitmap (cached).
- */
 private suspend fun loadImageBitmap(path: String): ImageBitmap? {
     return ThumbnailCache.getOrLoad(path)
 }

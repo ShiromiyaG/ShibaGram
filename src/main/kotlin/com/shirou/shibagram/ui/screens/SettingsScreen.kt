@@ -36,15 +36,20 @@ fun SettingsScreen(
     maxCacheSizeGb: Float = 2f,
     onMaxCacheSizeChange: (Float) -> Unit = {},
     currentCacheSize: String = "Unknown",
-    playerType: PlayerType = PlayerType.VLC,
+    playerType: PlayerType = PlayerType.MPV,
     onPlayerTypeChange: (PlayerType) -> Unit = {},
-    mpvPath: String = "",
-    onMpvPathChange: (String) -> Unit = {}
+    onCacheCleared: () -> Unit = {}
 ) {
     val scrollState = rememberScrollState()
     var showLogoutDialog by remember { mutableStateOf(false) }
     var showClearCacheDialog by remember { mutableStateOf(false) }
     var cacheCleared by remember { mutableStateOf(false) }
+    
+    LaunchedEffect(currentCacheSize) {
+        if (currentCacheSize == "0 B" || currentCacheSize.startsWith("0.")) {
+            cacheCleared = true
+        }
+    }
     
     Column(
         modifier = modifier
@@ -239,78 +244,6 @@ fun SettingsScreen(
                     }
                 }
             }
-            
-            // MPV path configuration (only shown when mpv is selected)
-            if (playerType == PlayerType.MPV) {
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        Surface(
-                            modifier = Modifier.size(36.dp),
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.Terminal,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "mpv path (optional)",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Leave empty to auto-detect from PATH",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    OutlinedTextField(
-                        value = mpvPath,
-                        onValueChange = onMpvPathChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("Auto-detect") },
-                        singleLine = true,
-                        trailingIcon = {
-                            IconButton(onClick = {
-                                SwingUtilities.invokeLater {
-                                    val chooser = JFileChooser().apply {
-                                        fileSelectionMode = JFileChooser.FILES_ONLY
-                                        dialogTitle = "Select mpv.exe"
-                                        currentDirectory = File(System.getProperty("user.home"))
-                                    }
-                                    val result = chooser.showOpenDialog(null)
-                                    if (result == JFileChooser.APPROVE_OPTION) {
-                                        onMpvPathChange(chooser.selectedFile.absolutePath)
-                                    }
-                                }
-                            }) {
-                                Icon(Icons.Default.FolderOpen, "Browse")
-                            }
-                        },
-                        shape = RoundedCornerShape(10.dp)
-                    )
-                }
-            }
         }
         
         Spacer(modifier = Modifier.height(16.dp))
@@ -386,6 +319,7 @@ fun SettingsScreen(
                     onClick = {
                         showClearCacheDialog = false
                         onClearCacheClick()
+                        onCacheCleared()
                         cacheCleared = true
                     }
                 ) {

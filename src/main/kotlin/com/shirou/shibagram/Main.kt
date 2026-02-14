@@ -124,7 +124,6 @@ fun ShibaGramApp(
     // Player preferences (persisted)
     val userPrefs = remember { com.shirou.shibagram.data.preferences.UserPreferencesRepository.getInstance() }
     var playerType by remember { mutableStateOf(userPrefs.playerType) }
-    var mpvPath by remember { mutableStateOf(userPrefs.mpvPath) }
 
     // MPV controls visibility (managed here because Canvas mouse listener lives here)
     var showMpvControls by remember { mutableStateOf(true) }
@@ -132,17 +131,17 @@ fun ShibaGramApp(
     // Debounce: ignore mouse-move-to-show for 600ms after a click-to-hide
     var lastControlsHideTime by remember { mutableStateOf(0L) }
 
-    // Active player engine (VLC or MPV) ÔÇö recreated when player type changes
-    val activePlayer: MediaPlayerEngine = remember(playerType, mpvPath) {
+    // Active player engine (VLC or MPV) — recreated when player type changes
+    val activePlayer: MediaPlayerEngine = remember(playerType) {
         when (playerType) {
             PlayerType.VLC -> VlcMediaPlayer()
-            PlayerType.MPV -> MpvMediaPlayer(mpvPath.takeIf { it.isNotBlank() })
+            PlayerType.MPV -> MpvMediaPlayer()
         }
     }
 
     // Video cache manager
     val cacheManager = remember { VideoCacheManager.getInstance() }
-    var maxCacheSizeGb by remember { mutableStateOf(2f) } // Default 2 GB
+    var maxCacheSizeGb by remember { mutableStateOf(userPrefs.maxCacheSizeGb) }
     var currentCacheSize by remember { mutableStateOf("Calculating...") }
 
     // Auto-hide MPV controls 3s after last interaction while playing
@@ -236,6 +235,7 @@ fun ShibaGramApp(
     // Continue watching and saved videos from repository
     val continueWatchingVideos by watchHistoryRepository.continueWatchingVideos.collectAsState()
     val savedVideos by watchHistoryRepository.savedVideos.collectAsState()
+    val watchedChannelIds by watchHistoryRepository.watchedChannelIds.collectAsState()
     
     // Streaming server - lazy, only started when actually needed for HTTP streaming fallback
     var currentStreamingToken by remember { mutableStateOf<String?>(null) }
@@ -278,6 +278,9 @@ fun ShibaGramApp(
         launch {
             watchHistoryRepository.loadSavedVideos()
         }
+        launch {
+            watchHistoryRepository.loadWatchedChannels()
+        }
         
         // Start cache manager monitoring (deferred - not needed at startup)
         launch {
@@ -297,6 +300,7 @@ fun ShibaGramApp(
     // Update cache manager limit when setting changes
     LaunchedEffect(maxCacheSizeGb) {
         cacheManager.maxCacheSizeBytes = (maxCacheSizeGb * 1024 * 1024 * 1024).toLong()
+        userPrefs.maxCacheSizeGb = maxCacheSizeGb
     }
     
     // Save playback progress periodically (debounced - only keyed on the video, NOT on position)
@@ -307,11 +311,13 @@ fun ShibaGramApp(
                 val pos = activePlayer.currentPosition.value
                 val dur = activePlayer.duration.value
                 if (pos > 0 && dur > 0) {
-                    watchHistoryRepository.saveProgress(
+watchHistoryRepository.saveProgress(
                         messageId = currentPlayingVideo!!.id,
                         chatId = currentPlayingVideo!!.chatId,
                         position = pos,
-                        duration = dur
+                        duration = dur,
+                        title = currentPlayingVideo!!.title.takeIf { it.isNotBlank() } ?: currentPlayingVideo!!.caption,
+                        thumbnailPath = currentPlayingVideo!!.thumbnail
                     )
                 }
             }
@@ -358,17 +364,50 @@ fun ShibaGramApp(
             activeDataProvider?.close()
             activeDataProvider = null
             
+            // If video doesn't have complete file info (from Continue Watching), fetch it
+            val playingVideo = if (video.videoFile.id == 0) {
+                println("Fetching complete video info for message ${video.id}")
+                telegramClient.getMessage(video.chatId, video.id) ?: run {
+                    println("Failed to fetch video info")
+                    return@let
+                }
+            } else {
+                video
+            }
+            
+            // Get saved position for resume
+            val savedPosition = watchHistoryRepository.getProgress(video.id)
+            println("Saved position: $savedPosition ms")
+            
+            // Determine mimeType with better detection
+            val mimeType = playingVideo.mimeType.takeIf { it.isNotBlank() }
+                ?: when {
+                    playingVideo.filename?.endsWith(".mkv", ignoreCase = true) == true -> "video/x-matroska"
+                    playingVideo.filename?.endsWith(".webm", ignoreCase = true) == true -> "video/webm"
+                    playingVideo.filename?.endsWith(".avi", ignoreCase = true) == true -> "video/x-msvideo"
+                    playingVideo.filename?.endsWith(".mov", ignoreCase = true) == true -> "video/quicktime"
+                    else -> "video/mp4"
+                }
+            
             // Check if video is already fully downloaded locally
-            val localPath = video.videoFile.localPath
-            if (localPath != null && video.videoFile.isDownloaded) {
+            val localPath = playingVideo.videoFile.localPath
+            if (localPath != null && playingVideo.videoFile.isDownloaded) {
                 // Play local file directly
                 println("Playing local file: $localPath")
                 activePlayer.play(localPath)
+                // Resume from saved position
+                savedPosition?.let { pos ->
+                    if (pos > 0) {
+                        kotlinx.coroutines.delay(500) // Wait for player to be ready
+                        activePlayer.seekTo(pos)
+                        println("Resumed at position: $pos ms")
+                    }
+                }
             } else {
                 // Start progressive download and play from local file as it downloads
                 scope.launch {
-                    val fileId = video.videoFile.id
-                    val fileSize = video.videoFile.size
+                    val fileId = playingVideo.videoFile.id
+                    val fileSize = playingVideo.videoFile.size
                     
                     // Create data provider to start the download
                     val dataProvider = TelegramVideoDataProvider(
@@ -394,28 +433,29 @@ fun ShibaGramApp(
                     // MPV/VLC fail to detect the format of these extensionless files.
                     // Streaming allows us to serve the file with the correct Content-Type header.
                     val streamingServer = VideoStreamingServer.getRunningInstance()
-                    val mimeType = video.mimeType ?: "video/mp4"
                     val streamUrl = streamingServer.registerVideo(fileId, fileSize, mimeType, dataProvider)
                     currentStreamingToken = "video_${fileId}"
-                    println("Streaming video from: $streamUrl")
+                    println("Streaming video from: $streamUrl (mimeType: $mimeType)")
                     activePlayer.play(streamUrl)
+                    // Resume from saved position
+                    savedPosition?.let { pos ->
+                        if (pos > 0) {
+                            kotlinx.coroutines.delay(500) // Wait for player to be ready
+                            activePlayer.seekTo(pos)
+                            println("Resumed at position: $pos ms")
+                        }
+                    }
                 }
             }
         } ?: run {
-            // Cleanup when stopping
+            // Cleanup when stopping (only if player wasn't already stopped)
             currentStreamingToken?.let { token ->
                 VideoStreamingServer.getInstance().unregisterVideo(token)
             }
             currentStreamingToken = null
             activeDataProvider?.close()
             activeDataProvider = null
-            if (playerInitialized) {
-                // Run stop on IO thread to avoid blocking the UI
-                launch(kotlinx.coroutines.Dispatchers.IO) {
-                    activePlayer.stop()
-                    activePlayer.detachWindow()
-                }
-            }
+            // Note: don't call stop() here - it's already called in onCloseClick
             // Trigger cache cleanup after video stops
             cacheManager.triggerCleanup()
         }
@@ -473,9 +513,38 @@ fun ShibaGramApp(
                             },
                             onFullscreenToggle = { onFullscreenChange(!isFullscreen) },
                             onCloseClick = {
-                                // Just clear state; LaunchedEffect will handle stopping the player
+                                // Save progress and stop player before clearing state
+                                val pos = activePlayer.currentPosition.value
+                                val dur = activePlayer.duration.value
+                                val video = currentPlayingVideo
+                                
+                                // Clear state first to prevent LaunchedEffect from running
                                 currentPlayingVideo = null
                                 currentPlaylist = null
+                                
+                                // Stop player and detach window
+                                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    activePlayer.stop()
+                                    activePlayer.detachWindow()
+                                }
+                                
+                                // Save progress and update continue watching
+                                if (video != null && pos > 0 && dur > 0) {
+                                    scope.launch {
+                                        watchHistoryRepository.saveProgress(
+                                            messageId = video.id,
+                                            chatId = video.chatId,
+                                            position = pos,
+                                            duration = dur,
+                                            title = video.title.takeIf { it.isNotBlank() } ?: video.caption,
+                                            thumbnailPath = video.thumbnail
+                                        )
+                                        watchHistoryRepository.updateWatchedChannel(video.chatId)
+                                        watchHistoryRepository.loadContinueWatching()
+                                        println("Saved progress on close: $pos ms")
+                                    }
+                                }
+                                
                                 // Exit fullscreen when closing video
                                 if (isFullscreen) {
                                     onFullscreenChange(false)
@@ -816,7 +885,13 @@ fun ShibaGramApp(
                                                 channel to videos
                                             }
                                         } else {
-                                            channels.take(5).map { channel ->
+                                            // Show channels sorted by last watched
+                                            val watchedChannels = watchedChannelIds.mapNotNull { id ->
+                                                channels.find { it.id == id }
+                                            }
+                                            // If no watched channels yet, show first 5
+                                            val channelsToShow = if (watchedChannels.isEmpty()) channels.take(5) else watchedChannels
+                                            channelsToShow.map { channel ->
                                                 channel to filteredVideos.filter { it.chatId == channel.id }.take(10)
                                             }
                                         },
@@ -899,7 +974,6 @@ fun ShibaGramApp(
                                         onMaxCacheSizeChange = { maxCacheSizeGb = it },
                                         currentCacheSize = currentCacheSize,
                                         onClearCacheClick = { 
-                                            // Clear telegram cache and downloaded videos
                                             scope.launch {
                                                 try {
                                                     cacheManager.clearAllCache()
@@ -909,6 +983,9 @@ fun ShibaGramApp(
                                                     println("Error clearing cache: ${e.message}")
                                                 }
                                             }
+                                        },
+                                        onCacheCleared = {
+                                            currentCacheSize = cacheManager.getFormattedCacheSize()
                                         },
                                         playerType = playerType,
                                         onPlayerTypeChange = { newType ->
@@ -920,11 +997,6 @@ fun ShibaGramApp(
                                             }
                                             playerType = newType
                                             userPrefs.playerType = newType
-                                        },
-                                        mpvPath = mpvPath,
-                                        onMpvPathChange = {
-                                            mpvPath = it
-                                            userPrefs.mpvPath = it
                                         }
                                     )
                                 }

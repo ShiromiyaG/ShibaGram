@@ -206,19 +206,20 @@ class VideoCacheManager private constructor() {
         println("VideoCacheManager: All cache cleared")
     }
     
-    private fun collectFiles(directory: File, result: MutableList<CachedFileInfo>) {
+private fun collectFiles(directory: File, result: MutableList<CachedFileInfo>) {
         val files = directory.listFiles() ?: return
         for (file in files) {
             if (file.isDirectory) {
                 collectFiles(file, result)
             } else {
                 val extension = file.extension.lowercase()
-                val isVideo = extension in VIDEO_EXTENSIONS
+                val isVideo = extension in VIDEO_EXTENSIONS || file.name.toIntOrNull() != null
+                val size = file.length()
                 result.add(CachedFileInfo(
                     file = file,
-                    size = file.length(),
+                    size = size,
                     lastModified = file.lastModified(),
-                    isVideo = isVideo
+                    isVideo = isVideo || size >= MIN_EVICTION_FILE_SIZE
                 ))
             }
         }

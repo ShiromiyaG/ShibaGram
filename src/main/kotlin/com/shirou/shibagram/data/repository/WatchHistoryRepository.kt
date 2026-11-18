@@ -6,6 +6,7 @@ import com.shirou.shibagram.data.local.ShibaGramDatabase
 import com.shirou.shibagram.data.local.WatchedChannelsTable
 import com.shirou.shibagram.domain.model.MediaMessage
 import com.shirou.shibagram.domain.model.VideoFile
+import com.shirou.shibagram.domain.model.VideoProgress
 import com.shirou.shibagram.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,10 @@ class WatchHistoryRepository {
 
     private val _savedVideos = MutableStateFlow<List<MediaMessage>>(emptyList())
     val savedVideos = _savedVideos.asStateFlow()
+
+    // Bumped on every progress write so screens showing per-video progress can reload it
+    private val _progressVersion = MutableStateFlow(0)
+    val progressVersion = _progressVersion.asStateFlow()
 
     private val _watchedChannelIds = MutableStateFlow<List<Long>>(emptyList())
     val watchedChannelIds = _watchedChannelIds.asStateFlow()
@@ -134,7 +139,30 @@ class WatchHistoryRepository {
                 }
             }
         }
+        _progressVersion.value++
         loadContinueWatching()
+    }
+
+    /** Progress of every video of a chat that has any, keyed by message id. */
+    suspend fun getProgressForChat(chatId: Long): Map<Long, VideoProgress> = db("reading chat progress") {
+        PlaybackProgressTable.select { PlaybackProgressTable.chatId eq chatId }
+            .associate { row ->
+                row[PlaybackProgressTable.messageId] to VideoProgress(
+                    position = row[PlaybackProgressTable.position],
+                    duration = row[PlaybackProgressTable.duration],
+                    isCompleted = row[PlaybackProgressTable.isCompleted]
+                )
+            }
+    } ?: emptyMap()
+
+    /** Mark a video as fully watched, or clear its progress (unwatched). */
+    suspend fun setWatched(video: MediaMessage, watched: Boolean) {
+        if (watched) {
+            val duration = (video.duration * 1000L).coerceAtLeast(1L)
+            saveProgress(video.id, video.chatId, duration, duration, video.title.ifBlank { null }, video.thumbnail)
+        } else {
+            removeFromContinueWatching(video.chatId, video.id)
+        }
     }
 
     /** Saved playback position (ms) for a video, if any. */
@@ -168,6 +196,7 @@ class WatchHistoryRepository {
 
     suspend fun removeFromContinueWatching(chatId: Long, messageId: Long) {
         db("removing from continue watching") { PlaybackProgressTable.deleteWhere { progressKey(chatId, messageId) } }
+        _progressVersion.value++
         loadContinueWatching()
     }
 

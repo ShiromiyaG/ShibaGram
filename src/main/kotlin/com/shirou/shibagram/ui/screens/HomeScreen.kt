@@ -114,7 +114,7 @@ fun HomeScreen(
                                 )
                             }
                             
-                            val thumbnailPainter = rememberThumbnailPainter(video.thumbnail)
+                            val thumbnailPainter = rememberThumbnailPainter(video.thumbnail, video.thumbnailFileId)
                             
                             VideoContextMenu(video, savedVideos, onSaveVideo, onRemoveFromContinue) {
                                 MediaCard(
@@ -157,7 +157,7 @@ fun HomeScreen(
                                 MediaCardData.fromMediaMessage(video, video.chatId)
                             }
                             
-                            val thumbnailPainter = rememberThumbnailPainter(video.thumbnail)
+                            val thumbnailPainter = rememberThumbnailPainter(video.thumbnail, video.thumbnailFileId)
                             
                             VideoContextMenu(video, savedVideos, onSaveVideo) {
                                 MediaCard(
@@ -201,7 +201,7 @@ fun HomeScreen(
                                     MediaCardData.fromMediaMessage(video, channel.id)
                                 }
                                 
-                                val thumbnailPainter = rememberThumbnailPainter(video.thumbnail)
+                                val thumbnailPainter = rememberThumbnailPainter(video.thumbnail, video.thumbnailFileId)
                                 
                                 VideoContextMenu(video, savedVideos, onSaveVideo) {
                                     MediaCard(
@@ -291,26 +291,3 @@ private fun HomeSection(
 }
 
 
-/**
- * Right-click menu for a video card: save/unsave and, for Continue Watching, remove from the list.
- */
-@Composable
-private fun VideoContextMenu(
-    video: MediaMessage,
-    savedVideos: List<MediaMessage>,
-    onSaveVideo: (MediaMessage) -> Unit,
-    onRemoveFromContinue: ((MediaMessage) -> Unit)? = null,
-    content: @Composable () -> Unit
-) {
-    val isSaved = savedVideos.any { it.id == video.id && it.chatId == video.chatId }
-    androidx.compose.foundation.ContextMenuArea(items = {
-        buildList {
-            add(androidx.compose.foundation.ContextMenuItem(if (isSaved) "Remove from saved" else "Save video") { onSaveVideo(video) })
-            if (onRemoveFromContinue != null) {
-                add(androidx.compose.foundation.ContextMenuItem("Remove from Continue Watching") { onRemoveFromContinue(video) })
-            }
-        }
-    }) {
-        content()
-    }
-}

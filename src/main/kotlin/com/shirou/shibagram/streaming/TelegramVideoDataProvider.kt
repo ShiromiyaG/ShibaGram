@@ -14,9 +14,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Serves byte ranges of a Telegram file while TDLib downloads it.
  *
- * File state comes from TDLib's UpdateFile events (no polling). When the player asks for a range
- * that isn't local yet, a download starting at that offset is requested once and the read waits
- * for the next file update, with a single overall deadline.
+ * TDLib downloads one range per file at a time (from an offset onwards), so the main job here is
+ * deciding when to move that range:
+ * - a read that is already covered (or just ahead of what is being downloaded) only waits;
+ * - a read far away (a seek, or Matroska's index at the end of the file) moves the download there,
+ *   and the next read back near the playback position moves it back.
+ * (Prefetching the MKV tail before starting was tried and measured: it made the start slower.)
+ *
+ * File state comes from TDLib's UpdateFile events; reads use one shared file handle.
  */
 class TelegramVideoDataProvider(
     private val telegramService: TelegramClientService,
@@ -26,16 +31,26 @@ class TelegramVideoDataProvider(
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val isClosed = AtomicBoolean(false)
-
     private val fileState = MutableStateFlow<TdApi.File?>(null)
 
-    // Offset of the last download we asked TDLib for, to avoid re-requesting on every read
+    // Current TDLib download request (offset onwards; limit 0 = to the end)
     @Volatile private var requestedOffset = -1L
+    @Volatile private var requestedLimit = 0L
+
+    // Last range known to be on disk (avoids asking TDLib on every small read)
+    @Volatile private var knownStart = 0L
+    @Volatile private var knownEnd = 0L
+
+    private val rafLock = Any()
+    private var raf: RandomAccessFile? = null
+    private var rafPath: String? = null
 
     companion object {
-        private const val READ_TIMEOUT_MS = 30_000L
+        private const val READ_TIMEOUT_MS = 45_000L
         private const val RECHECK_INTERVAL_MS = 1_000L
         private const val PRIORITY_PLAYBACK = 32
+        /** A read this far past the download frontier still just waits for it. */
+        private const val LOOKAHEAD_BYTES = 24L * 1024 * 1024
     }
 
     init {
@@ -46,27 +61,51 @@ class TelegramVideoDataProvider(
         }
         scope.launch {
             telegramService.getFileInfo(fileId)?.let { if (fileState.value == null) fileState.value = it }
-            requestDownload(0)
+            requestDownload(0, 0)
         }
     }
 
-    private suspend fun requestDownload(offset: Long) {
+    private fun isCompleted() = fileState.value?.local?.isDownloadingCompleted == true
+
+    private suspend fun requestDownload(offset: Long, limit: Long) {
         requestedOffset = offset
-        // limit = 0: download from offset to the end of the file
-        telegramService.startDownload(fileId, offset, 0, PRIORITY_PLAYBACK)
+        requestedLimit = limit
+        telegramService.startDownload(fileId, offset, limit, PRIORITY_PLAYBACK)
+    }
+
+    /** Whether a read at [offset] needs the TDLib download moved, or will be reached soon anyway. */
+    private fun needsDownloadAt(offset: Long): Boolean {
+        if (isCompleted()) return false
+        val start = requestedOffset
+        if (start < 0 || offset < start) return true
+        if (requestedLimit > 0 && offset >= start + requestedLimit) return true
+        val local = fileState.value?.local
+        val frontier = if (local != null && local.downloadOffset == start) start + local.downloadedPrefixSize else start
+        return offset > frontier + LOOKAHEAD_BYTES
     }
 
     private val localPath: String?
-        get() = fileState.value?.local?.path?.takeIf { it.isNotEmpty() && File(it).exists() }
+        get() = fileState.value?.local?.path?.takeIf { it.isNotEmpty() }
 
-    /** Bytes available at [offset], asking TDLib for exact ranges (downloads may not start at 0). */
+    /** Bytes available at [offset]. */
     private suspend fun availableAt(offset: Long): Long {
-        val local = fileState.value?.local ?: return 0
         if (localPath == null) return 0
-        if (local.isDownloadingCompleted) return (fileSize - offset).coerceAtLeast(0)
+        if (isCompleted()) return (fileSize - offset).coerceAtLeast(0)
+        if (offset >= knownStart && offset < knownEnd) return knownEnd - offset
+        val local = fileState.value?.local ?: return 0
         val prefixEnd = local.downloadOffset + local.downloadedPrefixSize
-        if (offset >= local.downloadOffset && offset < prefixEnd) return prefixEnd - offset
-        return telegramService.getDownloadedPrefixSize(fileId, offset)
+        if (offset >= local.downloadOffset && offset < prefixEnd) {
+            knownStart = local.downloadOffset
+            knownEnd = prefixEnd
+            return prefixEnd - offset
+        }
+        // TDLib tracks every downloaded range, not just the current one
+        val size = telegramService.getDownloadedPrefixSize(fileId, offset)
+        if (size > 0) {
+            knownStart = offset
+            knownEnd = offset + size
+        }
+        return size
     }
 
     override suspend fun readBytes(offset: Long, length: Int): ByteArray? {
@@ -75,8 +114,7 @@ class TelegramVideoDataProvider(
             while (!isClosed.get()) {
                 val available = availableAt(offset)
                 if (available > 0) return@withTimeoutOrNull readFromFile(offset, minOf(length.toLong(), available).toInt())
-                if (requestedOffset != offset) requestDownload(offset)
-                // Wait for the next file update (or re-check periodically)
+                if (needsDownloadAt(offset)) requestDownload(offset, 0)
                 val current = fileState.value
                 withTimeoutOrNull(RECHECK_INTERVAL_MS) { fileState.first { it !== current } }
             }
@@ -90,34 +128,44 @@ class TelegramVideoDataProvider(
         val path = localPath ?: return null
         val actualLength = minOf(length.toLong(), fileSize - offset).toInt()
         if (actualLength <= 0) return null
-        return try {
-            RandomAccessFile(path, "r").use { raf ->
-                raf.seek(offset)
+        return synchronized(rafLock) {
+            try {
+                // TDLib moves the file when the download completes: reopen when the path changes
+                if (raf == null || rafPath != path) {
+                    raf?.close()
+                    raf = RandomAccessFile(File(path), "r")
+                    rafPath = path
+                }
+                val file = raf!!
+                file.seek(offset)
                 val buffer = ByteArray(actualLength)
-                val bytesRead = raf.read(buffer)
+                val bytesRead = file.read(buffer)
                 when {
                     bytesRead <= 0 -> null
                     bytesRead < actualLength -> buffer.copyOf(bytesRead)
                     else -> buffer
                 }
+            } catch (e: Exception) {
+                Log.e("Error reading file $fileId at offset $offset: ${e.message}")
+                raf?.close()
+                raf = null
+                null
             }
-        } catch (e: Exception) {
-            Log.e("Error reading file $fileId at offset $offset: ${e.message}")
-            null
         }
     }
 
     override fun getAvailableDataSize(offset: Long): Long {
-        val local = fileState.value?.local ?: return 0
-        if (localPath == null) return 0
-        if (local.isDownloadingCompleted) return (fileSize - offset).coerceAtLeast(0)
-        val prefixEnd = local.downloadOffset + local.downloadedPrefixSize
-        return if (offset >= local.downloadOffset && offset < prefixEnd) prefixEnd - offset else 0
+        if (isCompleted()) return (fileSize - offset).coerceAtLeast(0)
+        return if (offset >= knownStart && offset < knownEnd) knownEnd - offset else 0
     }
 
     override fun close() {
         if (isClosed.getAndSet(true)) return
         scope.cancel()
+        synchronized(rafLock) {
+            raf?.close()
+            raf = null
+        }
         telegramService.cancelDownload(fileId)
     }
 }

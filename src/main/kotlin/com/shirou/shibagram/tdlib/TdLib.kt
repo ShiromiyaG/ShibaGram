@@ -4,40 +4,29 @@ import com.shirou.shibagram.util.Log
 import com.shirou.shibagram.util.NativeLibs
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
+import org.drinkless.tdlib.TdJsonNative
 
 /**
- * Loads the TDLib JNI library (tdjni.dll + its OpenSSL/zlib dependencies) and creates clients.
+ * Loads TDLib and creates clients.
+ *
+ * Desktop uses the prebuilt tdjson library from prebuilt-tdlib (tdjson.dll / libtdjson.so,
+ * self-contained: OpenSSL and zlib are linked in). Its TDLib commit must match TdApi.java.
  */
 object TdLib {
     @Volatile
     private var isInitialized = false
 
-    private val dependencies = listOf("zlib1.dll", "libcrypto-3-x64.dll", "libssl-3-x64.dll")
-
-    /**
-     * Load the native library once. Throws [UnsatisfiedLinkError] if tdjni.dll can't be loaded.
-     */
+    /** Load the native library once. Throws [UnsatisfiedLinkError] if it can't be loaded. */
     @Synchronized
     fun init() {
         if (isInitialized) return
         Log.d("TDLib: native search dirs: ${NativeLibs.searchDirs.map { it.absolutePath }}")
 
-        // Load the dependencies from the same folder as tdjni.dll so Windows doesn't pick up
-        // a different OpenSSL from PATH.
-        val tdjni = NativeLibs.find("tdjni.dll")
-            ?: throw UnsatisfiedLinkError("Could not find tdjni.dll. Please ensure it and its dependencies are in the libs/ folder.")
-        for (dep in dependencies) {
-            val depFile = tdjni.resolveSibling(dep)
-            if (depFile.isFile) {
-                try {
-                    System.load(depFile.absolutePath)
-                } catch (e: UnsatisfiedLinkError) {
-                    Log.w("TDLib: could not load $dep: ${e.message}")
-                }
-            }
-        }
-        System.load(tdjni.absolutePath)
-        Log.i("TDLib: loaded ${tdjni.absolutePath}")
+        val fileName = NativeLibs.mapLibraryName("tdjson")
+        val bundled = NativeLibs.find(fileName)
+        // Fall back to a system-wide install (e.g. a distro package) when nothing is bundled
+        TdJsonNative.load(bundled?.absolutePath ?: "tdjson")
+        Log.i("TDLib: loaded ${bundled?.absolutePath ?: "tdjson (system)"}")
 
         // 1 = errors only (TDLib's default, 3+, is extremely verbose)
         try {
@@ -48,9 +37,7 @@ object TdLib {
         isInitialized = true
     }
 
-    /**
-     * Create a new TDLib client.
-     */
+    /** Create a new TDLib client. */
     @Synchronized
     fun create(
         updateHandler: Client.ResultHandler,

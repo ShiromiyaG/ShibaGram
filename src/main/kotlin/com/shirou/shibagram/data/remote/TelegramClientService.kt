@@ -390,10 +390,10 @@ class TelegramClientService : AutoCloseable {
                 }
                 
                 // Try to get the photo path, download if not already downloaded
-                var photoPath = chat.photo?.small?.local?.path?.takeIf { it.isNotEmpty() }
-                if (photoPath == null && chat.photo?.small != null) {
+                val photoFile = chat.photo?.small
+                val photoPath = photoFile?.local?.path?.takeIf { it.isNotEmpty() }
+                if (photoPath == null && photoFile != null) {
                     // Start async download (non-blocking) — photo will appear once downloaded
-                    val photoFile = chat.photo.small
                     if (!photoFile.local.isDownloadingCompleted && photoFile.id != 0) {
                         try {
                             client?.send(DownloadFile(photoFile.id, 1, 0, 0, false), null)
@@ -405,6 +405,7 @@ class TelegramClientService : AutoCloseable {
                     id = chat.id,
                     name = chat.title,
                     photoPath = photoPath,
+                    photoFileId = photoFile?.id,
                     description = null,
                     isAvailableOnTelegram = true,
                     chatType = chatType
@@ -633,6 +634,27 @@ class TelegramClientService : AutoCloseable {
         }
     }
     
+    /** Downloads a small file (thumbnail/photo) and returns its local path once complete. */
+    suspend fun downloadSmallFile(fileId: Int): String? {
+        val response = sendAsync(DownloadFile(fileId, 1, 0, 0, true))
+        if (response is Error) Log.d("Thumbnail $fileId download failed: ${response.message}")
+        return (response as? TdApi.File)?.local?.takeIf { it.isDownloadingCompleted }?.path?.takeIf { it.isNotEmpty() }
+    }
+
+    /** The latest [limit] videos of a chat (native videos + video documents), newest first. */
+    suspend fun getRecentVideos(chatId: Long, limit: Int = 10): List<MediaMessage> = try {
+        listOf(SearchMessagesFilterVideo(), SearchMessagesFilterDocument())
+            .flatMap { filter -> searchChat(chatId, filter, limit = limit).orEmpty().mapNotNull { it.toMediaMessage(requestThumbnail = true) } }
+            .sortedByDescending { it.date }
+            .take(limit)
+            .also { list -> Log.d("Recent videos for $chatId: ${list.size}, with thumbnail: ${list.count { it.thumbnailFileId != null || it.thumbnail != null }}") }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.e("Error loading recent videos for $chatId: ${e.message}")
+        emptyList()
+    }
+
     /**
      * Search video messages in a specific chat, or across the first channels when [chatId] is null.
      */

@@ -37,7 +37,8 @@ interface MediaPlayerEngine {
 
     // ---- Playback --------------------------------------------------------
 
-    fun play(mediaPath: String)
+    /** Open [mediaPath] (file or URL), starting at [startMs]; [title] is shown instead of the URL. */
+    fun play(mediaPath: String, startMs: Long = 0L, title: String? = null)
     fun pause()
     fun resume()
     fun togglePlayPause()
@@ -46,6 +47,9 @@ interface MediaPlayerEngine {
     fun seekTo(position: Long)
     fun setVolume(vol: Float)
     fun setPlaybackSpeed(speed: Float)
+
+    /** Preferred audio/subtitle languages, comma-separated codes in priority order (e.g. "jpn,ja"). */
+    fun setPreferredLanguages(audio: String, subtitles: String) {}
 
     // ---- Track management ------------------------------------------------
 

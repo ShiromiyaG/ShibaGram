@@ -49,7 +49,12 @@ class MpvMediaPlayer : MediaPlayerEngine {
     private var eventThread: Thread? = null
     private var canvas: java.awt.Canvas? = null
     @Volatile private var windowHandle: Long = 0
-    @Volatile private var pendingMediaPath: String? = null
+    private data class PendingLoad(val path: String, val startMs: Long, val title: String?)
+    @Volatile private var pendingLoad: PendingLoad? = null
+
+    // Preferred track languages (mpv "alang"/"slang", comma separated, e.g. "jpn,ja")
+    @Volatile private var audioLanguages: String = ""
+    @Volatile private var subtitleLanguages: String = ""
     
     // Track info
     @Volatile private var _audioTracks = listOf<MediaPlayerEngine.TrackInfo>()
@@ -86,53 +91,49 @@ class MpvMediaPlayer : MediaPlayerEngine {
 
     // ...
 
-    override fun play(mediaPath: String) {
-        Log.d("MPV play() called with: $mediaPath")
-        
-        // Check if file exists to debug "No such file" errors
-        val file = java.io.File(mediaPath)
-        if (file.exists()) {
-             Log.d("MPV play(): File exists. Size: ${file.length()}")
-        } else {
-             Log.e("MPV play(): WARNING - File does not exist at path: $mediaPath")
-        }
-
+    override fun play(mediaPath: String, startMs: Long, title: String?) {
+        Log.d("MPV play: $mediaPath (start=${startMs}ms)")
         post {
-            Log.d("MPV play() task started for: $mediaPath")
             if (mpvHandle == null && windowHandle != 0L) {
                 createMpvInternal(windowHandle)
             }
-            
             val ctx = mpvHandle
             if (ctx == null) {
                 Log.d("MPV play deferred - no context yet")
-                pendingMediaPath = mediaPath
+                pendingLoad = PendingLoad(mediaPath, startMs, title)
                 return@post
             }
-
-            _isBuffering.value = true
-            
-            // formatting: use File.toURI() to handle spaces and special chars ([], etc)
-            // formatting: use File.toURI() to handle spaces and special chars ([], etc)
-            val validPath: String = try {
-                if (mediaPath.startsWith("http") || mediaPath.startsWith("rtsp") || mediaPath.startsWith("udp")) {
-                    mediaPath
-                } else {
-                    val f = java.io.File(mediaPath)
-                    var uri = f.toURI().toString()
-                    // Fix for Windows: MPV might need file:/// not file:/
-                    if (uri.startsWith("file:/") && !uri.startsWith("file:///")) {
-                         uri = uri.replaceFirst("file:/", "file:///")
-                    }
-                    uri
-                }
-            } catch (e: Exception) {
-                mediaPath.replace('\\', '/')
-            }
-            
-            Log.d("MPV loadfile: $validPath")
-            command(ctx, "loadfile", validPath, "replace")
+            loadFile(ctx, mediaPath, startMs, title)
         }
+    }
+
+    override fun setPreferredLanguages(audio: String, subtitles: String) {
+        audioLanguages = audio.trim()
+        subtitleLanguages = subtitles.trim()
+        setPropertyString("alang", audioLanguages)
+        setPropertyString("slang", subtitleLanguages)
+    }
+
+    /**
+     * loadfile with per-file options: the start position is applied by mpv itself once the file
+     * is open (no "wait 500 ms then seek", which failed on slow streams).
+     */
+    private fun loadFile(ctx: Pointer, mediaPath: String, startMs: Long, title: String?) {
+        _isBuffering.value = true
+        // Local files as file:/// URIs (handles spaces, [], non-ASCII); streams as-is
+        val target = if (mediaPath.contains("://")) mediaPath else try {
+            java.io.File(mediaPath).toURI().toString().replaceFirst(Regex("^file:/(?!//)"), "file:///")
+        } catch (e: Exception) {
+            mediaPath.replace('\\', '/')
+        }
+        val options = buildList {
+            if (startMs > 0) add("start=" + String.format(java.util.Locale.ROOT, "%.3f", startMs / 1000.0))
+            // %N% quoting lets the title contain commas and '='
+            if (!title.isNullOrBlank()) add("force-media-title=%${title.toByteArray(Charsets.UTF_8).size}%$title")
+        }.joinToString(",")
+        Log.d("MPV loadfile: $target [$options]")
+        if (options.isEmpty()) command(ctx, "loadfile", target, "replace")
+        else command(ctx, "loadfile", target, "replace", "0", options)
     }
 
     override fun release() {
@@ -191,34 +192,10 @@ class MpvMediaPlayer : MediaPlayerEngine {
                     }
                     createMpvInternal(hwnd)
                     
-                     val pending = pendingMediaPath
-                     if (pending != null) {
-                         pendingMediaPath = null
-                         val ctx = mpvHandle
-                         if (ctx != null) {
-                              _isBuffering.value = true
-                              
-                              // formatting: use File.toURI() to handle spaces and special chars ([], etc)
-                              val validPath: String = try {
-                                  if (pending.startsWith("http") || pending.startsWith("rtsp") || pending.startsWith("udp")) {
-                                      pending
-                                  } else {
-                                      val f = java.io.File(pending)
-                                      var uri = f.toURI().toString()
-                                      // Fix for Windows: MPV might need file:/// not file:/
-                                      if (uri.startsWith("file:/") && !uri.startsWith("file:///")) {
-                                           uri = uri.replaceFirst("file:/", "file:///")
-                                      }
-                                      uri
-                                  }
-                              } catch (e: Exception) {
-                                  pending.replace('\\', '/')
-                              }
-                              
-                              Log.d("MPV loadfile pending: $validPath")
-                              command(ctx, "loadfile", validPath, "replace")
-                         }
-                     }
+                    pendingLoad?.let { pending ->
+                        pendingLoad = null
+                        mpvHandle?.let { ctx -> loadFile(ctx, pending.path, pending.startMs, pending.title) }
+                    }
                  }
             }
         } catch (e: Exception) {
@@ -272,14 +249,24 @@ class MpvMediaPlayer : MediaPlayerEngine {
             LibMpv.INSTANCE.mpv_set_option_string(ctx, "keep-open", "yes")
             LibMpv.INSTANCE.mpv_set_option_string(ctx, "idle", "yes")
             LibMpv.INSTANCE.mpv_set_option_string(ctx, "video-sync", "audio")
-            
-            // Buffering options for streaming
-            LibMpv.INSTANCE.mpv_set_option_string(ctx, "stream-buffer-size", "8388608")
-            LibMpv.INSTANCE.mpv_set_option_string(ctx, "cache", "yes")
-            LibMpv.INSTANCE.mpv_set_option_string(ctx, "cache-secs", "30")
-            LibMpv.INSTANCE.mpv_set_option_string(ctx, "demuxer-readahead-secs", "30")
-            LibMpv.INSTANCE.mpv_set_option_string(ctx, "demuxer-max-bytes", "200M")
-            LibMpv.INSTANCE.mpv_set_option_string(ctx, "demuxer-max-back-bytes", "100M")
+
+            // Streaming from the local HTTP server (data arrives as Telegram downloads it)
+            val streamingOptions = listOf(
+                "cache" to "yes",
+                "cache-secs" to "60",
+                "demuxer-readahead-secs" to "60",
+                "demuxer-max-bytes" to "512MiB",
+                "demuxer-max-back-bytes" to "128MiB",
+                "stream-buffer-size" to "4MiB",
+                "network-timeout" to "60",           // Telegram can stall for a while on a seek
+                "cache-pause-initial" to "yes",      // buffer a little before starting: fewer stutters
+                "force-seekable" to "yes",
+                "hr-seek" to "yes",                  // exact seeks (resume lands where you left)
+                "demuxer-mkv-subtitle-preroll" to "index" // MKV: show subtitles right after a seek
+            )
+            for ((name, value) in streamingOptions) setOption(ctx, name, value)
+            if (audioLanguages.isNotEmpty()) setOption(ctx, "alang", audioLanguages)
+            if (subtitleLanguages.isNotEmpty()) setOption(ctx, "slang", subtitleLanguages)
             
             // Enable logging
             Log.d("MPV createMpvInternal: enabling logging")
@@ -323,6 +310,11 @@ class MpvMediaPlayer : MediaPlayerEngine {
         }
     }
     
+    private fun setOption(ctx: Pointer, name: String, value: String) {
+        val res = LibMpv.INSTANCE.mpv_set_option_string(ctx, name, value)
+        if (res < 0) Log.w("mpv option $name=$value rejected: ${LibMpv.INSTANCE.mpv_error_string(res)}")
+    }
+
     private fun observeProperty(ctx: Pointer, name: String, format: Int) {
         LibMpv.INSTANCE.mpv_observe_property(ctx, 0, name, format)
     }

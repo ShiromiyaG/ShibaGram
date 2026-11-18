@@ -23,16 +23,30 @@ data class MediaMessage(
     val audioPerformer: String? = null,
     val title: String = ""
 ) {
-    val formattedSize: String
-        get() {
-            val size = videoFile.size
-            if (size <= 0) return ""
-            val units = arrayOf("B", "KB", "MB", "GB", "TB")
-            val log10 = kotlin.math.log10(size.toDouble()) / kotlin.math.log10(1024.0)
-            val index = log10.toInt().coerceAtMost(4)
-            val value = size / Math.pow(1024.0, index.toDouble())
-            return String.format(Locale.getDefault(), "%.1f%s", value, units[index])
+    /** Title shown in the UI: caption, then title, then file name. */
+    val displayTitle: String
+        get() = caption?.takeIf { it.isNotBlank() }?.lineSequence()?.first()?.trim()
+            ?: title.ifEmpty { filename ?: "Video $id" }
+
+    private val extension: String
+        get() = filename?.substringAfterLast('.', "")?.lowercase() ?: ""
+
+    /** Content-Type to serve the stream with (players use it to pick the demuxer). */
+    val streamMimeType: String
+        get() = mimeType.takeIf { it.isNotBlank() } ?: when (extension) {
+            "mkv" -> "video/x-matroska"
+            "webm" -> "video/webm"
+            "avi" -> "video/x-msvideo"
+            "mov" -> "video/quicktime"
+            else -> "video/mp4"
         }
+
+    /** Matroska/WebM keep their seek index at the end of the file. */
+    val isMatroska: Boolean
+        get() = extension == "mkv" || extension == "webm" || mimeType.contains("matroska") || mimeType == "video/webm"
+
+    val formattedSize: String
+        get() = if (videoFile.size <= 0) "" else formatBytes(videoFile.size)
 
     val qualityLabel: String?
         get() {
@@ -55,9 +69,9 @@ data class MediaMessage(
             val minutes = (duration % 3600) / 60
             val seconds = duration % 60
             return if (hours > 0) {
-                String.format("%d:%02d:%02d", hours, minutes, seconds)
+                String.format(Locale.ROOT, "%d:%02d:%02d", hours, minutes, seconds)
             } else {
-                String.format("%d:%02d", minutes, seconds)
+                String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
             }
         }
 
@@ -98,6 +112,15 @@ data class MediaMessage(
                    it.endsWith(".gif", ignoreCase = true)
                } == true
     }
+}
+
+/** "1.5 GB"-style size, the same everywhere in the app. */
+fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    val index = (kotlin.math.log10(bytes.toDouble()) / kotlin.math.log10(1024.0)).toInt().coerceIn(0, 4)
+    val value = bytes / Math.pow(1024.0, index.toDouble())
+    return String.format(Locale.ROOT, "%.1f %s", value, units[index])
 }
 
 /**

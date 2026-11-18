@@ -78,29 +78,15 @@ fun MediaCard(
                     contentScale = ContentScale.Crop
                 )
             } else {
-                // Placeholder with subtle gradient
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.linearGradient(
-                                colors = listOf(
-                                    MaterialTheme.colorScheme.surfaceVariant,
-                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                                )
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                    )
-                }
+                // Moved up a bit so the title overlay doesn't cover it
+                PlaceholderThumbnail(mediaCardData, Modifier.fillMaxSize().padding(bottom = 40.dp))
             }
             
+            // Watched videos are dimmed so what's left to watch stands out
+            if (mediaCardData.isWatched) {
+                Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+            }
+
             // Bottom gradient overlay — taller for better readability
             Box(
                 modifier = Modifier
@@ -153,7 +139,7 @@ fun MediaCard(
                 }
             }
             
-            // Watched indicator
+            // Watched indicator, or a "NEW" badge for recent unwatched posts
             if (mediaCardData.isWatched) {
                 Icon(
                     imageVector = Icons.Default.CheckCircle,
@@ -164,6 +150,19 @@ fun MediaCard(
                         .size(22.dp),
                     tint = MaterialTheme.colorScheme.primary
                 )
+            } else if (mediaCardData.isNew && !mediaCardData.hasProgress) {
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.tertiary
+                ) {
+                    Text(
+                        text = "NEW",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onTertiary,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
             }
             
             // Duration badge — rounded pill
@@ -210,7 +209,7 @@ fun MediaCard(
             }
             
             // Progress bar — slightly thicker, with rounded ends
-            if (mediaCardData.hasProgress && mediaCardData.progressRatio > 0) {
+            if (mediaCardData.hasProgress && mediaCardData.progressRatio > 0 && !mediaCardData.isWatched) {
                 LinearProgressIndicator(
                     progress = { mediaCardData.progressRatio },
                     modifier = Modifier
@@ -278,19 +277,7 @@ fun MediaCardCompact(
                         contentScale = ContentScale.Crop
                     )
                 } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surfaceVariant),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PlayArrow,
-                            contentDescription = null,
-                            modifier = Modifier.size(32.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                        )
-                    }
+                    PlaceholderThumbnail(mediaCardData, Modifier.fillMaxSize())
                 }
                 
                 // Hover play overlay
@@ -328,8 +315,8 @@ fun MediaCardCompact(
                     }
                 }
                 
-                // Progress
-                if (mediaCardData.hasProgress) {
+                // Progress (watched videos show a check instead)
+                if (mediaCardData.hasProgress && !mediaCardData.isWatched) {
                     LinearProgressIndicator(
                         progress = { mediaCardData.progressRatio },
                         modifier = Modifier
@@ -407,6 +394,134 @@ fun MediaCardCompact(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Dense one-line row for the Compact viewing mode: small thumbnail, title, metadata, progress.
+ */
+@Composable
+fun MediaRowDense(
+    mediaCardData: MediaCardData,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    thumbnailPainter: Painter? = null,
+    index: Int? = null
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .hoverable(interactionSource)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick),
+        color = if (isHovered) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f) else Color.Transparent
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            if (index != null) {
+                Text(
+                    text = "${index + 1}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.width(32.dp)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .width(92.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                if (thumbnailPainter != null) {
+                    Image(thumbnailPainter, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                } else {
+                    PlaceholderThumbnail(mediaCardData, Modifier.fillMaxSize(), compact = true)
+                }
+                if (mediaCardData.hasProgress && !mediaCardData.isWatched) {
+                    LinearProgressIndicator(
+                        progress = { mediaCardData.progressRatio },
+                        modifier = Modifier.fillMaxWidth().height(3.dp).align(Alignment.BottomCenter),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = Color.Black.copy(alpha = 0.3f)
+                    )
+                }
+            }
+            Text(
+                text = mediaCardData.videoTitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (mediaCardData.isWatched) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (mediaCardData.qualityLabel.isNotEmpty()) {
+                Text(mediaCardData.qualityLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
+            Text(
+                mediaCardData.formattedSize,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(64.dp)
+            )
+            Text(
+                mediaCardData.durationText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(56.dp)
+            )
+            Box(modifier = Modifier.width(20.dp)) {
+                if (mediaCardData.isWatched) {
+                    Icon(Icons.Default.CheckCircle, "Watched", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Placeholder for videos that have no thumbnail on Telegram (common for MKV/document uploads):
+ * a gradient whose color comes from the series name (digits removed, so every episode of a show
+ * shares the same color) plus the file format.
+ */
+@Composable
+fun PlaceholderThumbnail(mediaCardData: MediaCardData, modifier: Modifier = Modifier, compact: Boolean = false) {
+    val message = mediaCardData.mediaMessage
+    val seriesKey = remember(message.id) { mediaCardData.videoTitle.filter { !it.isDigit() }.lowercase() }
+    val hue = remember(seriesKey) { ((seriesKey.hashCode().toLong() and 0xffffffffL) % 360).toFloat() }
+    val extension = remember(message.id) {
+        message.filename?.substringAfterLast('.', "")?.uppercase()?.takeIf { it.length in 2..4 }
+            ?: message.mimeType.substringAfter('/', "").uppercase().takeIf { it.length in 2..4 }
+            ?: "VIDEO"
+    }
+    Box(
+        modifier = modifier.background(
+            Brush.linearGradient(
+                listOf(Color.hsl(hue, 0.45f, 0.30f), Color.hsl((hue + 40f) % 360f, 0.40f, 0.16f))
+            )
+        ),
+        contentAlignment = Alignment.Center
+    ) {
+        if (compact) {
+            Text(extension, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.85f))
+        } else {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Rounded.PlayCircleFilled,
+                    contentDescription = null,
+                    modifier = Modifier.size(40.dp),
+                    tint = Color.White.copy(alpha = 0.55f)
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(extension, style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.7f))
             }
         }
     }

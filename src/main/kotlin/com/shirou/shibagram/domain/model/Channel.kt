@@ -8,6 +8,8 @@ data class Channel(
     val id: Long,
     val name: String,
     val photoPath: String? = null,
+    /** TDLib file id of the small photo, used to download it when [photoPath] isn't local yet. */
+    val photoFileId: Int? = null,
     val description: String? = null,
     val isAvailableOnTelegram: Boolean = true,
     val chatType: ChatType = ChatType.SUPERGROUP

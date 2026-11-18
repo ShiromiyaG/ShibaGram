@@ -25,6 +25,9 @@ data class MediaCardData(
     val formattedDuration: String = "",
     val durationText: String = ""
 ) {
+    /** Posted in the last 3 days. */
+    val isNew: Boolean
+        get() = mediaMessage.date > 0 && System.currentTimeMillis() / 1000 - mediaMessage.date < 3 * 24 * 3600
     companion object {
         fun fromMediaMessage(
             mediaMessage: MediaMessage,
@@ -32,7 +35,8 @@ data class MediaCardData(
             playbackPosition: Long = 0L,
             playbackDuration: Long = 0L,
             lastUpdated: Long = 0L,
-            channelIconPath: String = ""
+            channelIconPath: String = "",
+            isCompleted: Boolean? = null
         ): MediaCardData {
             val duration = playbackDuration.takeIf { it > 0 } ?: (mediaMessage.duration * 1000L)
             val progressRatio = if (duration > 0) {
@@ -45,17 +49,14 @@ data class MediaCardData(
                 playbackPosition = playbackPosition,
                 playbackDuration = duration,
                 lastUpdated = lastUpdated,
-                isWatched = progressRatio >= 0.9f,
+                isWatched = isCompleted ?: (progressRatio >= 0.95f),
                 thumbnailPath = mediaMessage.thumbnail ?: "",
                 channelIconPath = channelIconPath,
                 mediaType = mediaMessage.mediaType,
                 qualityLabel = mediaMessage.qualityLabel ?: "",
                 progressRatio = progressRatio,
                 hasProgress = playbackPosition > 0,
-                videoTitle = mediaMessage.caption?.takeIf { it.isNotBlank() }
-                    ?: mediaMessage.title.ifEmpty { 
-                        mediaMessage.filename ?: "Video ${mediaMessage.id}"
-                    },
+                videoTitle = mediaMessage.displayTitle,
                 formattedSize = mediaMessage.formattedSize,
                 formattedDuration = mediaMessage.formattedDuration,
                 durationText = mediaMessage.formattedDuration

@@ -32,13 +32,7 @@ class VideoCacheManager private constructor(
             }
         }
 
-        fun formatSize(bytes: Long): String {
-            if (bytes <= 0) return "0 B"
-            val units = arrayOf("B", "KB", "MB", "GB", "TB")
-            val index = (kotlin.math.log10(bytes.toDouble()) / kotlin.math.log10(1024.0)).toInt().coerceIn(0, 4)
-            val value = bytes / Math.pow(1024.0, index.toDouble())
-            return String.format(Locale.ROOT, "%.1f %s", value, units[index])
-        }
+        fun formatSize(bytes: Long): String = com.shirou.shibagram.domain.model.formatBytes(bytes)
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())

@@ -168,14 +168,28 @@ class VlcMediaPlayer : MediaPlayerEngine {
         }
     }
     
-    override fun play(mediaPath: String) {
+    @Volatile private var audioLanguages = ""
+    @Volatile private var subtitleLanguages = ""
+
+    override fun setPreferredLanguages(audio: String, subtitles: String) {
+        audioLanguages = audio.trim()
+        subtitleLanguages = subtitles.trim()
+    }
+
+    override fun play(mediaPath: String, startMs: Long, title: String?) {
         try {
-            if (mediaPath.startsWith("http://") || mediaPath.startsWith("https://")) {
-                // Local HTTP stream from VideoStreamingServer: larger network cache + auto reconnect
-                mediaPlayer?.media()?.play(mediaPath, ":network-caching=5000", ":http-reconnect")
-            } else {
-                mediaPlayer?.media()?.play(mediaPath)
+            val options = buildList {
+                if (mediaPath.startsWith("http://") || mediaPath.startsWith("https://")) {
+                    // Local HTTP stream from VideoStreamingServer: larger network cache + auto reconnect
+                    add(":network-caching=5000")
+                    add(":http-reconnect")
+                }
+                if (startMs > 0) add(":start-time=${startMs / 1000.0}")
+                if (audioLanguages.isNotEmpty()) add(":audio-language=$audioLanguages")
+                if (subtitleLanguages.isNotEmpty()) add(":sub-language=$subtitleLanguages")
+                if (!title.isNullOrBlank()) add(":meta-title=$title")
             }
+            mediaPlayer?.media()?.play(mediaPath, *options.toTypedArray())
         } catch (e: Exception) {
             onError?.invoke("Failed to play media: ${e.message}")
         }

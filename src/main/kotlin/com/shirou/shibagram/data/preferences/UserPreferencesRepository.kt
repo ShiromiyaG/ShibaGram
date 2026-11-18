@@ -4,6 +4,7 @@ import com.russhwolf.settings.Settings
 import com.russhwolf.settings.get
 import com.russhwolf.settings.set
 import com.shirou.shibagram.domain.model.PlayerType
+import com.shirou.shibagram.domain.model.VideoSortOrder
 import com.shirou.shibagram.domain.model.ViewingMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +23,13 @@ class UserPreferencesRepository {
         private const val KEY_DOWNLOAD_LOCATION = "download_location"
         private const val KEY_PLAYER_TYPE = "player_type"
         private const val KEY_MAX_CACHE_SIZE_GB = "max_cache_size_gb"
+        private const val KEY_VIDEO_SORT = "video_sort_order"
+        private const val KEY_VOLUME = "volume"
+        private const val KEY_PLAYBACK_SPEED = "playback_speed"
+        private const val KEY_EXTERNAL_PLAYER = "external_player_enabled"
+        private const val KEY_EXTERNAL_MPV_PATH = "external_mpv_path"
+        private const val KEY_AUDIO_LANGUAGES = "audio_languages"
+        private const val KEY_SUBTITLE_LANGUAGES = "subtitle_languages"
         
         @Volatile
         private var instance: UserPreferencesRepository? = null
@@ -44,6 +52,43 @@ class UserPreferencesRepository {
     private val _autoPlayNext = MutableStateFlow(settings[KEY_AUTO_PLAY_NEXT, true])
     val autoPlayNext: StateFlow<Boolean> = _autoPlayNext
     
+    private val _videoSortOrder = MutableStateFlow(
+        VideoSortOrder.entries.firstOrNull { it.name == settings[KEY_VIDEO_SORT, VideoSortOrder.NEWEST.name] } ?: VideoSortOrder.NEWEST
+    )
+    val videoSortOrder: StateFlow<VideoSortOrder> = _videoSortOrder
+
+    fun setVideoSortOrder(order: VideoSortOrder) {
+        settings[KEY_VIDEO_SORT] = order.name
+        _videoSortOrder.value = order
+    }
+
+    /** Last player volume (0..1) and speed, restored when a video starts. */
+    var volume: Float
+        get() = settings[KEY_VOLUME, 1f].coerceIn(0f, 1f)
+        set(value) { settings[KEY_VOLUME] = value.coerceIn(0f, 1f) }
+
+    var playbackSpeed: Float
+        get() = settings[KEY_PLAYBACK_SPEED, 1f].coerceIn(0.25f, 4f)
+        set(value) { settings[KEY_PLAYBACK_SPEED] = value }
+
+    /** Open videos in the user's own mpv instead of the built-in player. */
+    var externalPlayerEnabled: Boolean
+        get() = settings[KEY_EXTERNAL_PLAYER, false]
+        set(value) { settings[KEY_EXTERNAL_PLAYER] = value }
+
+    var externalMpvPath: String
+        get() = settings[KEY_EXTERNAL_MPV_PATH, ""]
+        set(value) { settings[KEY_EXTERNAL_MPV_PATH] = value.trim() }
+
+    /** Preferred track languages for the built-in player, e.g. "jpn,ja" and "pt-BR,pt,por,en". */
+    var audioLanguages: String
+        get() = settings[KEY_AUDIO_LANGUAGES, ""]
+        set(value) { settings[KEY_AUDIO_LANGUAGES] = value.trim() }
+
+    var subtitleLanguages: String
+        get() = settings[KEY_SUBTITLE_LANGUAGES, ""]
+        set(value) { settings[KEY_SUBTITLE_LANGUAGES] = value.trim() }
+
     fun setDarkTheme(enabled: Boolean) {
         settings[KEY_DARK_THEME] = enabled
         _darkTheme.value = enabled

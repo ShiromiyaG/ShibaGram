@@ -7,12 +7,16 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.*
 import com.shirou.shibagram.data.remote.TelegramClientService
@@ -23,6 +27,7 @@ import com.shirou.shibagram.data.repository.TelegramChannelsRepository
 import com.shirou.shibagram.domain.model.*
 import com.shirou.shibagram.player.MediaPlayerEngine
 import com.shirou.shibagram.player.MpvMediaPlayer
+import com.shirou.shibagram.player.ExternalMpvSession
 import com.shirou.shibagram.streaming.TelegramVideoDataProvider
 import com.shirou.shibagram.streaming.VideoStreamingServer
 import com.shirou.shibagram.ui.components.ShibaGramNavigationRail
@@ -66,11 +71,15 @@ fun main() = application {
         }
     }
     
+    // Keyboard shortcuts are handled by whichever screen registers a handler (the player)
+    val keyRouter = remember { KeyEventRouter() }
+
     Window(
         onCloseRequest = ::exitApplication,
         state = windowState,
         title = "ShibaGram - Telegram Media Client",
-        icon = appIcon
+        icon = appIcon,
+        onPreviewKeyEvent = { event -> keyRouter.handler?.invoke(event) ?: false }
     ) {
         window.minimumSize = Dimension(800, 600)
         
@@ -80,9 +89,15 @@ fun main() = application {
         ShibaGramApp(
             isFullscreen = isFullscreen,
             onFullscreenChange = { isFullscreen = it },
-            windowMinimized = windowState.isMinimized
+            windowMinimized = windowState.isMinimized,
+            keyRouter = keyRouter
         )
     }
+}
+
+/** Routes window key events to the screen that currently wants them. */
+class KeyEventRouter {
+    var handler: ((androidx.compose.ui.input.key.KeyEvent) -> Boolean)? = null
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -90,7 +105,8 @@ fun main() = application {
 fun ShibaGramApp(
     isFullscreen: Boolean = false,
     onFullscreenChange: (Boolean) -> Unit = {},
-    windowMinimized: Boolean = false
+    windowMinimized: Boolean = false,
+    keyRouter: KeyEventRouter = remember { KeyEventRouter() }
 ) {
     // Repositories
     val authRepository = remember { TelegramAuthRepository() }
@@ -137,7 +153,24 @@ fun ShibaGramApp(
     var currentAudioTrack by remember { mutableStateOf(-1) }
     var subtitleTracks by remember { mutableStateOf<List<MediaPlayerEngine.TrackInfo>>(emptyList()) }
     var currentSubtitleTrack by remember { mutableStateOf(-1) }
-    var playbackSpeed by remember { mutableStateOf(1f) }
+    var playbackSpeed by remember { mutableStateOf(userPrefs.playbackSpeed) }
+    // Volume before muting with "M", restored on the next "M"
+    var volumeBeforeMute by remember { mutableStateOf(1f) }
+
+    // Preferred audio/subtitle languages (Settings), applied to the engine
+    var audioLanguages by remember { mutableStateOf(userPrefs.audioLanguages) }
+    var subtitleLanguages by remember { mutableStateOf(userPrefs.subtitleLanguages) }
+    LaunchedEffect(activePlayer, audioLanguages, subtitleLanguages) {
+        activePlayer.setPreferredLanguages(audioLanguages, subtitleLanguages)
+    }
+
+    // Restore the last volume/speed once the engine is ready
+    LaunchedEffect(activePlayer, playerInitialized) {
+        if (playerInitialized) {
+            activePlayer.setVolume(userPrefs.volume)
+            activePlayer.setPlaybackSpeed(playbackSpeed)
+        }
+    }
 
     // MPV controls: force-show when paused, auto-hide 3s after last interaction while playing
     LaunchedEffect(showMpvControls, isPlayerPlaying, mpvInteractionKey) {
@@ -234,6 +267,29 @@ fun ShibaGramApp(
         }
     }
     
+    // Home: latest videos of the recently watched channels (or the first channels), loaded per channel
+    val homeChannels = remember(watchedChannelIds, channels) {
+        val watched = watchedChannelIds.mapNotNull { id -> channels.find { it.id == id } }
+        if (watched.isEmpty()) channels.take(5) else watched
+    }
+    var homeRecentVideos by remember { mutableStateOf<Map<Long, List<MediaMessage>>>(emptyMap()) }
+    LaunchedEffect(homeChannels.map { it.id }) {
+        for (channel in homeChannels) {
+            if (homeRecentVideos.containsKey(channel.id)) continue
+            val videos = telegramClient.getRecentVideos(channel.id)
+            homeRecentVideos = homeRecentVideos + (channel.id to videos)
+        }
+    }
+
+    // Channel video list: sort order (persisted), status filter and per-video progress
+    val videoSortOrder by userPrefs.videoSortOrder.collectAsState()
+    var videoStatusFilter by remember { mutableStateOf(VideoStatusFilter.ALL) }
+    val progressVersion by watchHistoryRepository.progressVersion.collectAsState()
+    var channelProgress by remember { mutableStateOf<Map<Long, VideoProgress>>(emptyMap()) }
+    LaunchedEffect(selectedChannel?.id, progressVersion) {
+        channelProgress = selectedChannel?.let { watchHistoryRepository.getProgressForChat(it.id) } ?: emptyMap()
+    }
+
     // Search results from TDLib API (for cross-channel video search)
     var searchResults by remember { mutableStateOf<List<MediaMessage>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
@@ -321,6 +377,55 @@ fun ShibaGramApp(
         isSearching = false
     }
     
+    fun toggleSaved(video: MediaMessage) {
+        scope.launch {
+            if (savedVideos.any { it.id == video.id && it.chatId == video.chatId }) {
+                watchHistoryRepository.unsaveVideo(video.chatId, video.id)
+            } else {
+                watchHistoryRepository.saveVideo(video)
+            }
+        }
+    }
+
+    // Player keyboard shortcuts (active while a video is open)
+    DisposableEffect(currentPlayingVideo != null, activePlayer, isFullscreen) {
+        if (currentPlayingVideo != null) {
+            keyRouter.handler = { event ->
+                if (event.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) false
+                else handlePlayerKey(
+                    key = event.key,
+                    shift = event.isShiftPressed,
+                    player = activePlayer,
+                    isFullscreen = isFullscreen,
+                    onFullscreenChange = onFullscreenChange,
+                    onToggleMute = {
+                        val vol = activePlayer.volume.value
+                        if (vol > 0f) {
+                            volumeBeforeMute = vol
+                            activePlayer.setVolume(0f)
+                        } else {
+                            activePlayer.setVolume(volumeBeforeMute.takeIf { it > 0f } ?: 1f)
+                        }
+                    },
+                    onNext = {
+                        currentPlaylist?.takeIf { it.hasNext }?.next()?.let {
+                            currentPlaylist = it
+                            currentPlayingVideo = it.currentVideo
+                        }
+                    },
+                    onPrevious = {
+                        currentPlaylist?.takeIf { it.hasPrevious }?.previous()?.let {
+                            currentPlaylist = it
+                            currentPlayingVideo = it.currentVideo
+                        }
+                    },
+                    onVolumeSaved = { userPrefs.volume = it }
+                )
+            }
+        }
+        onDispose { keyRouter.handler = null }
+    }
+
     // Track active data provider for cleanup
     var activeDataProvider by remember { mutableStateOf<TelegramVideoDataProvider?>(null) }
 
@@ -333,8 +438,67 @@ fun ShibaGramApp(
 
     // Start a video and the playlist around it. If the clicked video isn't part of [videos]
     // (e.g. it came from Continue Watching or search), play it as a one-item playlist.
+    // ---- External mpv ------------------------------------------------------------------------
+    var externalPlayerEnabled by remember { mutableStateOf(userPrefs.externalPlayerEnabled) }
+    var externalMpvPath by remember { mutableStateOf(userPrefs.externalMpvPath) }
+    var externalSession by remember { mutableStateOf<ExternalMpvSession?>(null) }
+    var externalNowPlaying by remember { mutableStateOf<MediaMessage?>(null) }
+
+    // Streams for external players are created when mpv opens their URL
+    LaunchedEffect(Unit) {
+        VideoStreamingServer.getInstance().resolver = VideoStreamingServer.VideoResolver { chatId, messageId ->
+            val message = telegramClient.getMessage(chatId, messageId) ?: return@VideoResolver null
+            val file = message.videoFile
+            VideoStreamingServer.StreamingFile(
+                fileId = file.id,
+                size = file.size,
+                mimeType = message.streamMimeType,
+                dataProvider = TelegramVideoDataProvider(telegramClient, file.id, file.size)
+            )
+        }
+    }
+
+    fun playExternally(video: MediaMessage, list: List<MediaMessage>) {
+        externalSession?.stop()
+        val server = VideoStreamingServer.getRunningInstance()
+        val index = list.indexOfFirst { it.id == video.id && it.chatId == video.chatId }.coerceAtLeast(0)
+        val session = ExternalMpvSession(
+            mpvPath = externalMpvPath,
+            playlist = list,
+            startIndex = index,
+            urlFor = { server.urlFor(it.chatId, it.id, it.filename) },
+            savedPositionMs = { watchHistoryRepository.getProgress(it.chatId, it.id) },
+            onProgress = { v, pos, dur ->
+                watchHistoryRepository.saveProgress(v.id, v.chatId, pos, dur, v.title.ifBlank { null }, v.thumbnail)
+                watchHistoryRepository.updateWatchedChannel(v.chatId)
+            },
+            onActiveVideoChanged = { v ->
+                externalNowPlaying = v
+                // Only the video mpv is playing keeps its stream (and download) open
+                server.releaseLazyStreams(keep = setOfNotNull(v?.let { "${it.chatId}/${it.id}" }))
+            },
+            onExit = {
+                server.releaseLazyStreams()
+                externalSession = null
+                cacheManager.triggerCleanup()
+            }
+        )
+        externalSession = session
+        try {
+            session.start()
+        } catch (e: Exception) {
+            Log.e("Could not start external mpv", e)
+            playerError = "Could not start mpv: ${e.message}"
+            externalSession = null
+        }
+    }
+
     fun startPlayback(video: MediaMessage, videos: List<MediaMessage>, channelName: String) {
         val list = if (videos.any { it.id == video.id && it.chatId == video.chatId }) videos else listOf(video)
+        if (externalPlayerEnabled && ExternalMpvSession.isValidMpvPath(externalMpvPath)) {
+            playExternally(video, list)
+            return
+        }
         currentPlaylist = VideoPlaylist(
             id = video.chatId,
             channelId = video.chatId,
@@ -375,20 +539,19 @@ fun ShibaGramApp(
 
         val savedPosition = watchHistoryRepository.getProgress(video.chatId, video.id)
 
+        // Resume where it was left (unless it was watched to the end: then start over)
+        val durationMs = playingVideo.duration * 1000L
+        val finished = durationMs > 0 && savedPosition != null &&
+            savedPosition >= durationMs * com.shirou.shibagram.data.repository.WatchHistoryRepository.COMPLETED_THRESHOLD
+        val startMs = if (savedPosition != null && savedPosition > 0 && !finished) savedPosition else 0L
+        val title = playingVideo.displayTitle
+
         val localPath = playingVideo.videoFile.localPath
         if (localPath != null && playingVideo.videoFile.isDownloaded) {
-            activePlayer.play(localPath)
+            activePlayer.play(localPath, startMs, title)
         } else {
             // Always use HTTP streaming for incomplete files: TDLib stores partial downloads without
             // an extension, so MPV/VLC can't detect the format. The server sends a proper Content-Type.
-            val mimeType = playingVideo.mimeType.takeIf { it.isNotBlank() }
-                ?: when (playingVideo.filename?.substringAfterLast('.', "")?.lowercase()) {
-                    "mkv" -> "video/x-matroska"
-                    "webm" -> "video/webm"
-                    "avi" -> "video/x-msvideo"
-                    "mov" -> "video/quicktime"
-                    else -> "video/mp4"
-                }
             val fileId = playingVideo.videoFile.id
             val fileSize = playingVideo.videoFile.size
             val dataProvider = TelegramVideoDataProvider(
@@ -398,16 +561,13 @@ fun ShibaGramApp(
             )
             activeDataProvider = dataProvider
             val stream = VideoStreamingServer.getRunningInstance()
-                .registerVideo(fileId, fileSize, mimeType, dataProvider)
+                .registerVideo(fileId, fileSize, playingVideo.streamMimeType, dataProvider)
             currentStreamingToken = stream.token
-            activePlayer.play(stream.url)
+            activePlayer.play(stream.url, startMs, title)
         }
 
-        // Resume from saved position
-        if (savedPosition != null && savedPosition > 0) {
-            delay(500) // Wait for player to be ready
-            activePlayer.seekTo(savedPosition)
-        }
+        // Speed is a per-file property in some engines: re-apply it for every video
+        activePlayer.setPlaybackSpeed(playbackSpeed)
     }
 
     // Auto-play the next playlist item when the current one ends (callback comes from a native thread)
@@ -463,7 +623,10 @@ fun ShibaGramApp(
                             volume = playerVolume,
                             onPlayPauseClick = { activePlayer.togglePlayPause() },
                             onSeek = { position -> activePlayer.seekTo(position) },
-                            onVolumeChange = { vol -> activePlayer.setVolume(vol) },
+                            onVolumeChange = { vol ->
+                                activePlayer.setVolume(vol)
+                                userPrefs.volume = vol
+                            },
                             onPreviousClick = {
                                 currentPlaylist?.let {
                                     val newPlaylist = it.previous()
@@ -540,6 +703,7 @@ fun ShibaGramApp(
                             onPlaybackSpeedChange = { speed ->
                                 activePlayer.setPlaybackSpeed(speed)
                                 playbackSpeed = speed
+                                userPrefs.playbackSpeed = speed
                             },
                             renderControlsAsPopup = activePlayer.rendersToWindow,
                             videoContent = { overlay ->
@@ -592,6 +756,8 @@ fun ShibaGramApp(
                                                 }.also { canvas ->
                                                     canvas.background = java.awt.Color.BLACK
                                                     canvas.ignoreRepaint = true
+                                                    // Keep keyboard focus in the Compose window so shortcuts keep working
+                                                    canvas.isFocusable = false
                                                     
                                                     canvas.addMouseListener(object : java.awt.event.MouseAdapter() {
                                                         override fun mouseClicked(e: java.awt.event.MouseEvent?) {
@@ -822,6 +988,13 @@ fun ShibaGramApp(
                                 }
                                 
                                 HorizontalDivider()
+
+                                externalNowPlaying?.let { playing ->
+                                    ExternalPlayerBar(
+                                        title = playing.displayTitle,
+                                        onStop = { externalSession?.stop() }
+                                    )
+                                }
                                 
                                 // Screen content
                                 when (selectedNavIndex) {
@@ -837,34 +1010,21 @@ fun ShibaGramApp(
                                                 channel to videos
                                             }
                                         } else {
-                                            // Show channels sorted by last watched
-                                            val watchedChannels = watchedChannelIds.mapNotNull { id ->
-                                                channels.find { it.id == id }
-                                            }
-                                            // If no watched channels yet, show first 5
-                                            val channelsToShow = if (watchedChannels.isEmpty()) channels.take(5) else watchedChannels
-                                            channelsToShow.map { channel ->
-                                                channel to filteredVideos.filter { it.chatId == channel.id }.take(10)
-                                            }
+                                            // Recently watched channels (or the first ones) with their latest videos
+                                            homeChannels.map { channel -> channel to homeRecentVideos[channel.id].orEmpty() }
                                         },
                                         continueWatchingVideos = continueWatchingVideos,
                                         savedVideos = savedVideos,
                                         onVideoClick = { video ->
-                                            startPlayback(video, currentVideos, channels.find { it.id == video.chatId }?.name ?: "")
+                                            val list = if (currentVideos.any { it.chatId == video.chatId }) currentVideos
+                                                else homeRecentVideos[video.chatId].orEmpty()
+                                            startPlayback(video, list, channels.find { it.id == video.chatId }?.name ?: "")
                                         },
                                         onChannelClick = { channel ->
                                             selectedChannel = channel
                                             selectedNavIndex = 1
                                         },
-                                        onSaveVideo = { video ->
-                                            scope.launch {
-                                                if (savedVideos.any { it.id == video.id && it.chatId == video.chatId }) {
-                                                    watchHistoryRepository.unsaveVideo(video.chatId, video.id)
-                                                } else {
-                                                    watchHistoryRepository.saveVideo(video)
-                                                }
-                                            }
-                                        },
+                                        onSaveVideo = { video -> toggleSaved(video) },
                                         onRemoveFromContinue = { video ->
                                             scope.launch {
                                                 watchHistoryRepository.removeFromContinueWatching(video.chatId, video.id)
@@ -873,19 +1033,48 @@ fun ShibaGramApp(
                                         isLoading = isLoadingVideos
                                     )
                                     
-                                    1 -> ChannelsScreen(
+                                    1 -> {
+                                    val baseVideos = if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
+                                        // When searching, show search results (filtered to selected channel if one is selected)
+                                        if (selectedChannel != null) {
+                                            (searchResults.filter { it.chatId == selectedChannel!!.id } + filteredVideos)
+                                                .distinctBy { it.id }
+                                        } else searchResults
+                                    } else filteredVideos
+                                    // What the user sees is also the playlist order, so "next" follows the list
+                                    val shownVideos = remember(baseVideos, videoSortOrder, videoStatusFilter, channelProgress) {
+                                        videoSortOrder.sort(baseVideos.filter { videoStatusFilter.matches(it, channelProgress[it.id]) })
+                                    }
+                                    val channelName = selectedChannel?.name ?: ""
+                                    ChannelsScreen(
                                         channels = filteredChannels,
                                         selectedChannel = selectedChannel,
-                                        videos = if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
-                                            // When searching, show search results (filtered to selected channel if one is selected)
-                                            if (selectedChannel != null) {
-                                                (searchResults.filter { it.chatId == selectedChannel!!.id } + filteredVideos)
-                                                    .distinctBy { it.id }
-                                            } else searchResults
-                                        } else filteredVideos,
+                                        videos = shownVideos,
+                                        allVideoCount = baseVideos.size,
+                                        progress = channelProgress,
+                                        sortOrder = videoSortOrder,
+                                        onSortOrderChange = { userPrefs.setVideoSortOrder(it) },
+                                        statusFilter = videoStatusFilter,
+                                        onStatusFilterChange = { videoStatusFilter = it },
+                                        savedVideos = savedVideos,
+                                        onSaveVideo = { video -> toggleSaved(video) },
+                                        onSetWatched = { video, watched ->
+                                            scope.launch { watchHistoryRepository.setWatched(video, watched) }
+                                        },
+                                        onContinue = {
+                                            // Resume the first in-progress video, else the first unwatched one
+                                            val next = shownVideos.firstOrNull { channelProgress[it.id]?.let { p -> !p.isCompleted && p.position > 0 } == true }
+                                                ?: shownVideos.firstOrNull { channelProgress[it.id]?.isCompleted != true }
+                                                ?: shownVideos.firstOrNull()
+                                            next?.let { startPlayback(it, shownVideos, channelName) }
+                                        },
+                                        onPlayAll = { shownVideos.firstOrNull()?.let { startPlayback(it, shownVideos, channelName) } },
+                                        onPlayExternal = if (ExternalMpvSession.isValidMpvPath(externalMpvPath)) {
+                                            { video -> playExternally(video, shownVideos) }
+                                        } else null,
                                         onChannelSelect = { selectedChannel = it },
                                         onVideoClick = { video ->
-                                            startPlayback(video, currentVideos, selectedChannel?.name ?: "")
+                                            startPlayback(video, shownVideos, channelName)
                                         },
                                         isLoading = isLoadingVideos,
                                         viewingMode = viewingMode,
@@ -895,6 +1084,7 @@ fun ShibaGramApp(
                                             channelsRepository.selectFolder(folderId)
                                         }
                                     )
+                                    }
                                     
                                     2 -> SettingsScreen(
                                         isDarkTheme = isDarkTheme,
@@ -939,6 +1129,26 @@ fun ShibaGramApp(
                                             }
                                             playerType = newType
                                             userPrefs.playerType = newType
+                                        },
+                                        externalPlayerEnabled = externalPlayerEnabled,
+                                        onExternalPlayerEnabledChange = {
+                                            externalPlayerEnabled = it
+                                            userPrefs.externalPlayerEnabled = it
+                                        },
+                                        externalMpvPath = externalMpvPath,
+                                        onExternalMpvPathChange = {
+                                            externalMpvPath = it
+                                            userPrefs.externalMpvPath = it
+                                        },
+                                        audioLanguages = audioLanguages,
+                                        onAudioLanguagesChange = {
+                                            audioLanguages = it
+                                            userPrefs.audioLanguages = it
+                                        },
+                                        subtitleLanguages = subtitleLanguages,
+                                        onSubtitleLanguagesChange = {
+                                            subtitleLanguages = it
+                                            userPrefs.subtitleLanguages = it
                                         }
                                     )
                                 }
@@ -977,6 +1187,79 @@ fun ShibaGramApp(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Player shortcuts (YouTube/mpv style):
+ * Space/K play-pause · ←/→ 5s (Shift: 30s) · J/L 10s · ↑/↓ volume · M mute · F fullscreen ·
+ * Esc leave fullscreen · N/P next/previous · 0-9 jump to 0%-90%.
+ */
+private fun handlePlayerKey(
+    key: androidx.compose.ui.input.key.Key,
+    shift: Boolean,
+    player: MediaPlayerEngine,
+    isFullscreen: Boolean,
+    onFullscreenChange: (Boolean) -> Unit,
+    onToggleMute: () -> Unit,
+    onNext: () -> Unit,
+    onPrevious: () -> Unit,
+    onVolumeSaved: (Float) -> Unit
+): Boolean {
+    fun seekBy(ms: Long) {
+        val duration = player.duration.value
+        val target = (player.currentPosition.value + ms).coerceAtLeast(0L)
+        player.seekTo(if (duration > 0) target.coerceAtMost(duration - 1000L) else target)
+    }
+    fun volumeBy(delta: Float) {
+        val v = (player.volume.value + delta).coerceIn(0f, 1f)
+        player.setVolume(v)
+        onVolumeSaved(v)
+    }
+    val k = androidx.compose.ui.input.key.Key
+    when (key) {
+        k.Spacebar, k.K -> player.togglePlayPause()
+        k.DirectionLeft -> seekBy(if (shift) -30_000 else -5_000)
+        k.DirectionRight -> seekBy(if (shift) 30_000 else 5_000)
+        k.J -> seekBy(-10_000)
+        k.L -> seekBy(10_000)
+        k.DirectionUp -> volumeBy(0.05f)
+        k.DirectionDown -> volumeBy(-0.05f)
+        k.M -> onToggleMute()
+        k.F -> onFullscreenChange(!isFullscreen)
+        k.Escape -> if (isFullscreen) onFullscreenChange(false) else return false
+        k.N -> onNext()
+        k.P -> onPrevious()
+        else -> {
+            val digit = listOf(k.Zero, k.One, k.Two, k.Three, k.Four, k.Five, k.Six, k.Seven, k.Eight, k.Nine).indexOf(key)
+            if (digit < 0) return false
+            val duration = player.duration.value
+            if (duration > 0) player.seekTo(duration * digit / 10)
+        }
+    }
+    return true
+}
+
+/** Shown while a video plays in the external mpv. */
+@Composable
+private fun ExternalPlayerBar(title: String, onStop: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+            Text(
+                text = "Playing in mpv: $title",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onStop) { Text("Close mpv") }
         }
     }
 }

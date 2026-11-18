@@ -33,6 +33,42 @@
 | 🎨 **Material 3 UI** | Modern design following latest guidelines |
 | 📦 **Portable** | Run without installation - single folder distribution |
 
+### Channel video list
+- **Sort** (remembered): newest/oldest, name A→Z / Z→A with natural order (`Ep 2` before `Ep 10`), duration, size
+- **Filter**: All · Unwatched · In progress · Watched · Downloaded
+- **Progress on every card**: progress bar, ✓ for watched (dimmed), `NEW` for posts from the last 3 days
+- **Continue** resumes the first in-progress (or next unwatched) video; **Play all** plays the list in the shown order
+- The player's next/previous and auto-play follow the order shown on screen
+- **Right-click a video**: save/unsave, mark as watched/unwatched, show the downloaded file in its folder
+- **Jump buttons** (bottom-right of the list): go straight to the first or the last video
+- **Grid / List / Compact** views (Compact is a dense numbered list, good for long series)
+- Videos without a Telegram thumbnail get a colored placeholder per series with the file format
+
+### Player keyboard shortcuts
+| Key | Action |
+|-----|--------|
+| `Space` / `K` | Play / pause |
+| `←` / `→` | Back / forward 5 s (`Shift`: 30 s) |
+| `J` / `L` | Back / forward 10 s |
+| `↑` / `↓` | Volume |
+| `M` | Mute |
+| `F` / `Esc` | Fullscreen / leave fullscreen |
+| `N` / `P` | Next / previous video |
+| `0`–`9` | Jump to 0 %–90 % |
+
+Volume and playback speed are remembered between sessions.
+
+### Streaming and external mpv
+- Videos that aren't fully downloaded are streamed from a local HTTP server while Telegram downloads them.
+  Seeks move the download to the new position; MKV files (index at the end) open without waiting for the whole file.
+- **External mpv** (Settings → Player): plays in your own mpv with your `mpv.conf`, shaders and scripts.
+  The clicked video and the rest of the list go to mpv as a playlist (use mpv's next/previous keys); progress is
+  saved and each video resumes where you left it. Right-click a video → *Open in external mpv* works even when the
+  built-in player is the default.
+- **Preferred languages** (built-in player): audio/subtitle language codes, e.g. `jpn,ja` and `pt-BR,pt,por,en`.
+- `gradlew streamingSmokeTest -Pmpv="C:\path\mpv.com"` checks streaming end to end with your session
+  (close the app first): it plays an MKV headless from the start and after seeks, and an external-mpv playlist.
+
 ---
 
 ## 📸 Screenshots
@@ -71,11 +107,22 @@
    - Login and create a new application
    - Note your `api_id` and `api_hash`
 
-4. **TDLib native library**
-   - `libs/tdjni.dll` (+ `libcrypto-3-x64.dll`, `libssl-3-x64.dll`, `zlib1.dll`) is bundled.
-   - To update it, build TDLib with `-DTD_ENABLE_JNI=ON` ([build guide](https://tdlib.github.io/td/build.html?language=Java))
-     and replace **both** the DLLs and `src/main/java/org/drinkless/tdlib/TdApi.java` + `Client.java`:
-     `tdjni.dll` must match `TdApi.java` exactly.
+4. **TDLib native library** (bundled, prebuilt; nothing to install)
+   - Windows: `libs/tdjson.dll` · Linux: `libs/linux-x64/libtdjson.so`, `libs/linux-arm64/libtdjson.so`
+     (from [prebuilt-tdlib](https://github.com/eilvelia/tdl/tree/main/packages/prebuilt-tdlib), self-contained).
+   - The app keeps TDLib's official Java API (`org.drinkless.tdlib.TdApi`). On desktop, `Client` is a
+     small Kotlin class that talks to `tdjson` and converts TdApi objects to/from JSON
+     (`src/main/kotlin/org/drinkless/tdlib/`). On Android the same `TdApi.java` works with the official
+     JNI `Client.java` + `libtdjni.so` from [TDLibAndroidPrebuilt](https://github.com/FaiBah/TDLibAndroidPrebuilt).
+
+   **Updating TDLib** (keep both sides on the same TDLib commit):
+   1. Pick a TDLib version available in both prebuilt-tdlib (npm `@prebuilt-tdlib/win32-x64`, `linux-x64-glibc`,
+      `linux-arm64-glibc`) and TDLibAndroidPrebuilt; check that `tdlib.commit` in the npm package equals
+      `GIT_COMMIT_HASH` in that release's `TdApi.java`.
+   2. Replace the libraries in `libs/` and `src/main/java/org/drinkless/tdlib/TdApi.java`.
+   3. In `TdApi.java`, remove the `static { System.loadLibrary("tdjni") }` block and replace both
+      `public native String toString();` with `return TdJsonCodec.encode(this);` (marked "ShibaGram desktop").
+   4. Run `gradlew test` (JSON codec tests) and fix any API changes the compiler reports.
 
 ### 2. Configuration
 
@@ -117,7 +164,7 @@ ShibaGramTDLIB/
 │   │   │   └── 📂 model/        # Domain models
 │   │   ├── 📂 streaming/        # Video streaming server
 │   │   ├── 📂 player/           # Player abstraction + mpv (libmpv via JNA)
-│   │   ├── 📂 tdlib/            # TDLib JNI loader
+│   │   ├── 📂 tdlib/            # TDLib (tdjson) loader
 │   │   ├── 📂 util/             # Logging, native library lookup
 │   │   ├── 📂 ui/
 │   │   │   ├── 📂 components/   # Reusable UI components
@@ -211,8 +258,8 @@ The app follows **Clean Architecture** principles:
 - Add VLC to your system PATH, or set `VLC_PLUGIN_PATH` environment variable
 
 ### TDLib not loading
-- Ensure `tdjni.dll` is in the `libs/` folder
-- Also include dependencies: `zlib1.dll`, `libcrypto-3-x64.dll`, `libssl-3-x64.dll`
+- Ensure `tdjson.dll` (Windows) or `libtdjson.so` (Linux, in `libs/linux-x64/` or next to the launcher) is present
+- Windows needs the Microsoft Visual C++ runtime; the packaged app already ships it with its Java runtime
 
 ### Authentication issues
 - Verify your API_ID and API_HASH are correct

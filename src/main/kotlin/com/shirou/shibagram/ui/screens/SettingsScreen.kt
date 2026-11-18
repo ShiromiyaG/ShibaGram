@@ -11,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.shirou.shibagram.domain.model.PlayerType
@@ -37,7 +38,15 @@ fun SettingsScreen(
     onMaxCacheSizeChange: (Float) -> Unit = {},
     currentCacheSize: String = "Unknown",
     playerType: PlayerType = PlayerType.MPV,
-    onPlayerTypeChange: (PlayerType) -> Unit = {}
+    onPlayerTypeChange: (PlayerType) -> Unit = {},
+    externalPlayerEnabled: Boolean = false,
+    onExternalPlayerEnabledChange: (Boolean) -> Unit = {},
+    externalMpvPath: String = "",
+    onExternalMpvPathChange: (String) -> Unit = {},
+    audioLanguages: String = "",
+    onAudioLanguagesChange: (String) -> Unit = {},
+    subtitleLanguages: String = "",
+    onSubtitleLanguagesChange: (String) -> Unit = {}
 ) {
     val scrollState = rememberScrollState()
     var showLogoutDialog by remember { mutableStateOf(false) }
@@ -238,6 +247,33 @@ fun SettingsScreen(
                         )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(12.dp))
+
+                ExternalPlayerSettings(
+                    enabled = externalPlayerEnabled,
+                    onEnabledChange = onExternalPlayerEnabledChange,
+                    path = externalMpvPath,
+                    onPathChange = onExternalMpvPathChange
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text("Preferred languages (built-in player)", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "Comma-separated codes in order of preference, e.g. audio \"jpn,ja\" and subtitles \"pt-BR,pt,por,en\". Leave empty to use the file's default tracks.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LanguageField("Audio", audioLanguages, onAudioLanguagesChange, Modifier.weight(1f))
+                    LanguageField("Subtitles", subtitleLanguages, onSubtitleLanguagesChange, Modifier.weight(1f))
+                }
             }
         }
         
@@ -423,5 +459,70 @@ private fun SettingsItem(
                 )
             }
         }
+    }
+}
+
+/** Text field that commits its value when it loses focus (not on every keystroke). */
+@Composable
+private fun LanguageField(label: String, value: String, onCommit: (String) -> Unit, modifier: Modifier = Modifier) {
+    var text by remember(value) { mutableStateOf(value) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it },
+        label = { Text(label) },
+        singleLine = true,
+        modifier = modifier.onFocusChanged { if (!it.isFocused && text != value) onCommit(text) }
+    )
+}
+
+@Composable
+private fun ExternalPlayerSettings(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    path: String,
+    onPathChange: (String) -> Unit
+) {
+    val valid = com.shirou.shibagram.player.ExternalMpvSession.isValidMpvPath(path)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Open videos in external mpv", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "Uses your own mpv (with its mpv.conf, shaders and scripts). The rest of the list is queued as a playlist and progress is still saved.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = enabled, onCheckedChange = onEnabledChange, enabled = valid || enabled)
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    var text by remember(path) { mutableStateOf(path) }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            label = { Text("mpv.exe") },
+            placeholder = { Text("C:\\...\\mpv.exe") },
+            singleLine = true,
+            isError = text.isNotBlank() && !com.shirou.shibagram.player.ExternalMpvSession.isValidMpvPath(text),
+            supportingText = {
+                when {
+                    text.isBlank() -> Text("Path to mpv.exe")
+                    !com.shirou.shibagram.player.ExternalMpvSession.isValidMpvPath(text) -> Text("mpv.exe not found at this path")
+                    else -> Text("OK")
+                }
+            },
+            modifier = Modifier.weight(1f).onFocusChanged { if (!it.isFocused && text != path) onPathChange(text) }
+        )
+        OutlinedButton(onClick = {
+            val chooser = javax.swing.JFileChooser(java.io.File(text).parentFile?.takeIf { it.isDirectory })
+            chooser.dialogTitle = "Select mpv.exe"
+            chooser.fileFilter = javax.swing.filechooser.FileNameExtensionFilter("mpv (mpv.exe)", "exe", "com")
+            if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) {
+                val chosen = chooser.selectedFile.absolutePath
+                text = chosen
+                onPathChange(chosen)
+            }
+        }) { Text("Browse…") }
     }
 }

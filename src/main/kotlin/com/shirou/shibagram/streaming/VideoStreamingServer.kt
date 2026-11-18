@@ -25,6 +25,48 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         val dataProvider: VideoDataProvider
     )
     
+    /** Creates a stream on demand for a Telegram message (used by /tg/<chatId>/<messageId> URLs). */
+    fun interface VideoResolver {
+        suspend fun resolve(chatId: Long, messageId: Long): StreamingFile?
+    }
+
+    @Volatile
+    var resolver: VideoResolver? = null
+
+    // Streams created on demand, keyed by "chatId/messageId"
+    private val lazyFiles = ConcurrentHashMap<String, StreamingFile>()
+
+    /**
+     * URL of a stream that is resolved only when a player requests it, so a whole playlist can be
+     * handed to an external player without opening every file up front. [fileName] only helps the
+     * player guess the format and show a name.
+     */
+    fun urlFor(chatId: Long, messageId: Long, fileName: String? = null): String {
+        val name = java.net.URLEncoder.encode(fileName?.takeIf { it.isNotBlank() } ?: "video", "UTF-8").replace("+", "%20")
+        return "http://$serverAddress:$listeningPort/tg/$chatId/$messageId/$name"
+    }
+
+    /** Close on-demand streams, except the ones whose key "chatId/messageId" is in [keep]. */
+    fun releaseLazyStreams(keep: Set<String> = emptySet()) {
+        for (key in lazyFiles.keys.toList()) {
+            if (key !in keep) lazyFiles.remove(key)?.dataProvider?.close()
+        }
+    }
+
+    private fun lazyStream(path: String): StreamingFile? {
+        val parts = path.removePrefix("/tg/").split('/')
+        val chatId = parts.getOrNull(0)?.toLongOrNull() ?: return null
+        val messageId = parts.getOrNull(1)?.toLongOrNull() ?: return null
+        val key = "$chatId/$messageId"
+        lazyFiles[key]?.let { return it }
+        synchronized(lazyFiles) {
+            lazyFiles[key]?.let { return it }
+            val file = runBlocking { resolver?.resolve(chatId, messageId) } ?: return null
+            lazyFiles[key] = file
+            return file
+        }
+    }
+
     interface VideoDataProvider {
         suspend fun readBytes(offset: Long, length: Int): ByteArray?
         fun getAvailableDataSize(offset: Long): Long
@@ -63,6 +105,11 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         }
     }
     
+    init {
+        // NanoHTTPD logs every client disconnect (players drop connections on seek/close) as SEVERE
+        java.util.logging.Logger.getLogger(NanoHTTPD::class.java.name).level = java.util.logging.Level.OFF
+    }
+
     private fun startServer() {
         // Let failures propagate: a URL with port 0 would only fail later and less clearly
         start(SOCKET_READ_TIMEOUT, false)
@@ -124,6 +171,11 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         
         return when {
             uri.startsWith("/video/") -> handleVideoRequest(session)
+            uri.startsWith("/tg/") -> {
+                val file = lazyStream(uri)
+                    ?: return createSilentResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Video not found")
+                serveFile(session, file)
+            }
             else -> createSilentResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
         }
     }
@@ -133,6 +185,10 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         val streamingFile = streamingFiles[token]
             ?: return createSilentResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Video not found")
         
+        return serveFile(session, streamingFile)
+    }
+
+    private fun serveFile(session: IHTTPSession, streamingFile: StreamingFile): Response {
         return try {
             when (session.method) {
                 Method.HEAD -> handleHeadRequest(streamingFile)
@@ -171,42 +227,41 @@ class VideoStreamingServer private constructor() : NanoHTTPD(0) {
         return response
     }
     
+    /**
+     * Serves "bytes=start-end", "bytes=start-" and "bytes=-suffix" to the requested end.
+     * The body streams as TDLib downloads it; a player that seeks just closes the connection.
+     * (Capping responses at a few MB, as before, made players re-request constantly.)
+     */
     private fun handleRangeRequest(rangeHeader: String, streamingFile: StreamingFile): Response {
-        // Parse range header: "bytes=start-end" or "bytes=start-"
-        val rangeSpec = rangeHeader.removePrefix("bytes=")
-        val parts = rangeSpec.split("-")
-        
-        val start = parts[0].toLongOrNull() ?: 0L
-        val requestedEnd = if (parts.size > 1 && parts[1].isNotEmpty()) {
-            parts[1].toLongOrNull() ?: (streamingFile.size - 1)
+        val size = streamingFile.size
+        val spec = rangeHeader.removePrefix("bytes=").substringBefore(',').trim()
+        val startText = spec.substringBefore('-').trim()
+        val endText = spec.substringAfter('-', "").trim()
+
+        val start: Long
+        val end: Long
+        if (startText.isEmpty()) {
+            // Suffix range: the last N bytes
+            val suffix = endText.toLongOrNull() ?: 0L
+            start = (size - suffix).coerceAtLeast(0)
+            end = size - 1
         } else {
-            // For "bytes=start-" requests, limit to available data or max chunk
-            val available = streamingFile.dataProvider.getAvailableDataSize(start)
-            val maxChunk = 2 * 1024 * 1024L // 2MB max per request
-            if (available > 0) {
-                minOf(start + available - 1, start + maxChunk - 1, streamingFile.size - 1)
-            } else {
-                minOf(start + maxChunk - 1, streamingFile.size - 1)
-            }
+            start = startText.toLongOrNull() ?: 0L
+            end = endText.toLongOrNull()?.coerceAtMost(size - 1) ?: (size - 1)
         }
-        
-        // Validate range
-        if (start >= streamingFile.size) {
+
+        if (start >= size || end < start) {
             val response = createSilentResponse(Response.Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "Range not satisfiable")
-            response.addHeader("Content-Range", "bytes */${streamingFile.size}")
+            response.addHeader("Content-Range", "bytes */$size")
             return response
         }
-        
-        // Limit end to what we can reasonably serve
-        val maxChunkSize = 4 * 1024 * 1024L // 4MB max
-        val actualEnd = minOf(requestedEnd, start + maxChunkSize - 1, streamingFile.size - 1)
-        val contentLength = actualEnd - start + 1
-        
-        Log.d("Range request: $start-$actualEnd (${contentLength / 1024}KB) of ${streamingFile.size / 1024}KB")
-        
+
+        val contentLength = end - start + 1
+        Log.d("Range request: $start-$end (${contentLength / 1024}KB) of ${size / 1024}KB")
+
         val inputStream = VideoInputStream(streamingFile.dataProvider, start, contentLength)
         val response = createSilentResponse(Response.Status.PARTIAL_CONTENT, streamingFile.mimeType, inputStream, contentLength)
-        response.addHeader("Content-Range", "bytes $start-$actualEnd/${streamingFile.size}")
+        response.addHeader("Content-Range", "bytes $start-$end/$size")
         response.addHeader("Accept-Ranges", "bytes")
         response.addHeader("Content-Length", contentLength.toString())
         addCorsHeaders(response)

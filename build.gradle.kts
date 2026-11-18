@@ -69,8 +69,12 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.0")
     
-    // TDLib: official JNI interface (org.drinkless.tdlib, sources in src/main/java).
-    // The native tdjni.dll (+ OpenSSL/zlib) lives in libs/ and must match TdApi.java.
+    // TDLib: TdApi.java (src/main/java) + a tdjson-backed Client (src/main/kotlin/org/drinkless/tdlib).
+    // Natives from prebuilt-tdlib: libs/tdjson.dll, libs/linux-x64|linux-arm64/libtdjson.so.
+    // Their TDLib commit must match TdApi.java (see README).
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    // TdApi.java uses @IntDef/@Nullable (already a runtime dependency of Compose)
+    compileOnly("androidx.annotation:annotation-jvm:1.8.0")
     
     // VLC for video playback
     implementation("uk.co.caprica:vlcj:4.8.2")
@@ -102,7 +106,8 @@ compose.desktop {
         mainClass = "com.shirou.shibagram.MainKt"
         
         nativeDistributions {
-            targetFormats(TargetFormat.Msi, TargetFormat.Exe)
+            // Each format is built on its own OS (Msi/Exe on Windows, Deb on Linux)
+            targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb)
             packageName = "ShibaGram"
             packageVersion = project.version.toString()
             description = "Telegram Media Client for Desktop"
@@ -119,18 +124,38 @@ compose.desktop {
     }
 }
 
-// Copy native DLLs from libs/ into the app image after createDistributable
+// Copy the bundled native libraries for the current OS into the app image after createDistributable
+val nativeLibsDir: String = run {
+    val os = System.getProperty("os.name").lowercase()
+    val arch = when (System.getProperty("os.arch").lowercase()) {
+        "amd64", "x86_64" -> "x64"
+        "aarch64", "arm64" -> "arm64"
+        else -> System.getProperty("os.arch").lowercase()
+    }
+    if (os.startsWith("windows")) "libs" else "libs/linux-$arch"
+}
+
 tasks.matching { it.name == "createDistributable" }.configureEach {
+    // jpackage marks the launcher read-only, which made every rebuild fail to delete the old image
+    doFirst {
+        layout.buildDirectory.dir("compose/binaries/main/app").get().asFile
+            .walkTopDown().filter { it.isFile }.forEach { it.setWritable(true) }
+    }
     doLast {
         val appDir = layout.buildDirectory.dir("compose/binaries/main/app/ShibaGram").get().asFile
+        // Linux app images keep the launcher in bin/, which is where NativeLibs looks first
+        val targetDir = if (appDir.resolve("bin").isDirectory) appDir.resolve("bin") else appDir
         if (appDir.exists()) {
             project.copy {
-                from(project.file("libs")) {
-                    include("*.dll")
+                from(project.file(nativeLibsDir)) {
+                    include("*.dll", "*.so")
                 }
-                into(appDir)
+                from(project.file("libs")) { include("LICENSE*") }
+                into(targetDir)
             }
-            println("Native DLLs copied to: ${appDir.absolutePath}")
+            println("Native libraries copied to: ${targetDir.absolutePath}")
+            // Clear read-only flags now too, so the next build can replace the image
+            appDir.walkTopDown().filter { it.isFile }.forEach { it.setWritable(true) }
         }
     }
 }
@@ -183,4 +208,16 @@ tasks.withType<JavaExec>().configureEach {
         "${projectDir.absolutePath}/libs",
         System.getProperty("java.library.path") ?: ""
     ).joinToString(File.pathSeparator))
+}
+
+// Manual end-to-end streaming check against the real Telegram session (see StreamingSmokeTest.kt)
+tasks.register<JavaExec>("streamingSmokeTest") {
+    group = "verification"
+    description = "Streams an MKV from Telegram into mpv headless and reports start/seek times"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.shirou.shibagram.tools.StreamingSmokeTestKt")
+    args(
+        (project.findProperty("mpv") as String?) ?: "mpv.com",
+        (project.findProperty("channelFilter") as String?) ?: ""
+    )
 }
